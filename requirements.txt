@@ -1,0 +1,9 @@
+# Nikon KeyMission 360 Formatter
+# Python dependencies
+
+# USB access library
+# Provides Python bindings for libusb-1.0
+libusb1>=3.0.0
+
+# Alternative USB library (uncomment if preferred)
+# pyusb>=1.2.1
