@@ -162,6 +162,7 @@ These are toggle/text commands that perform actions.
   - `1` = 10 seconds
   - `2` = 30 seconds
   - `3` = 60 seconds
+- **Purpose:** Likely controls the buffer duration for Loop Recording mode (dashcam-style recording where only the most recent X seconds are kept). Camera also supports Standard, Time-lapse, and Superlapse modes (see d304).
 - Usage: `gphoto2 --set-config movielooplength=2` (30 sec)
 
 #### /main/capturesettings/liveviewafmode
@@ -232,6 +233,7 @@ These are low-level Nikon-specific properties accessible via gphoto2.
 - Type: MENU (RW)
 - Current: 0
 - Choices: `0`, `1`, `2`, `3`
+- **Purpose:** Selects movie recording mode. Camera supports Standard, Loop Recording, Time-lapse, and Superlapse modes. Exact mapping of 0-3 to modes is unknown.
 - Usage: `gphoto2 --set-config /main/other/d304=1`
 
 #### /main/other/d0a0 - Movie Screen Size

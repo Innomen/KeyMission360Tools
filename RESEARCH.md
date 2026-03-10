@@ -425,9 +425,9 @@ Using gphoto2, the KeyMission 360 exposes **80+ configurable properties** across
 | datetime | /main/settings/datetime | DATE | Set camera time (use `now`) |
 | movie | /main/actions/movie | TOGGLE | Start/stop recording |
 | whitebalance | /main/imgsettings/whitebalance | RADIO | Auto/Daylight/Fluorescent/Tungsten |
-| movielooplength | /main/capturesettings/movielooplength | RADIO | 5/10/30/60 seconds |
+| movielooplength | /main/capturesettings/movielooplength | RADIO | 5/10/30/60 seconds (loop recording buffer) |
 | capturetarget | /main/settings/capturetarget | RADIO | Internal RAM or Memory card |
-| d304 | /main/other/d304 | MENU | Movie Capture Mode (0-3) |
+| d304 | /main/other/d304 | MENU | Movie Capture Mode (0-3) - likely Standard/Loop/Timelapse/Superlapse |
 | d0aa | /main/other/d0aa | MENU | Wind Noise Reduction (0/1) |
 | d323 | /main/other/d323 | MENU | Movie Loop Length (50/100/300/600) |
 | d338 | /main/other/d338 | TEXT | Camera Name/SSID |
@@ -577,7 +577,32 @@ gphoto2 --set-config capturetarget=1         # Memory card
 
 ---
 
-*Document Version: 2.0*
+## 12. Known Unknowns
+
+The following settings have been identified but their exact behavior or value mappings are not fully understood:
+
+### 12.1 Movie Capture Mode (d304)
+- **Address:** `/main/other/d304`
+- **Type:** MENU (0, 1, 2, 3)
+- **Current Knowledge:** The camera supports multiple recording modes: Standard, Loop Recording, Time-lapse, and Superlapse (hyperlapse). This setting likely selects between them.
+- **Unknown:** Which value (0-3) corresponds to which mode.
+- **Testing needed:** Try each value and observe camera behavior when recording.
+
+### 12.2 Movie Loop Length (movielooplength / d323)
+- **Address:** `/main/capturesettings/movielooplength` (and `/main/other/d323`)
+- **Type:** RADIO (0=5s, 1=10s, 2=30s, 3=60s)
+- **Current Knowledge:** The camera has a Loop Recording mode that acts like a dashcam - it continuously records to a buffer and only keeps the most recent X seconds. This setting likely controls that buffer duration.
+- **Unknown:** Does this affect standard recording mode, or only when d304 is set to loop mode?
+- **Related:** May interact with d304 (Movie Capture Mode).
+
+### 12.3 Movie Screen Size (d0a0)
+- **Address:** `/main/other/d0a0`
+- **Type:** MENU (10, 20, 40, 80, 90)
+- **Unknown:** How these values map to actual video resolutions.
+
+---
+
+*Document Version: 2.1*
 *Date: 2026-03-10*
 *Researcher: AI Assistant / Claude Code*
 *Updates: Added complete gphoto2 property discovery, WiFi config, datetime behavior*

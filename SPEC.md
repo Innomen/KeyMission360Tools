@@ -137,7 +137,7 @@ Offset  Size  Description
 ### 3.4 Capture Settings
 | Config Path | Name | Type | Current | Options |
 |-------------|------|------|---------|---------|
-| `/main/capturesettings/movielooplength` | **Movie Loop Length** | RADIO | 5 | 5, 10, 30, 60 seconds |
+| `/main/capturesettings/movielooplength` | **Movie Loop Length** | RADIO | 5 | 5, 10, 30, 60 seconds (for loop recording mode) |
 | `/main/capturesettings/exposurecompensation` | Exposure Compensation | RADIO | 0 | -2 to +2 stops |
 | `/main/capturesettings/expprogram` | Exposure Program | RADIO | 8201 | M, P, A, S, Auto |
 | `/main/capturesettings/shutterspeed2` | Shutter Speed | RADIO | 1/32000 | 30s to 1/32000 |
@@ -146,7 +146,7 @@ Offset  Size  Description
 ### 3.5 Nikon Vendor Extensions (Writable!)
 | Property | Address | Type | Current | Description |
 |----------|---------|------|---------|-------------|
-| d304 | `/main/other/d304` | MENU | 0 | **Movie Capture Mode** (0-3) |
+| d304 | `/main/other/d304` | MENU | 0 | **Movie Capture Mode** (0-3) - likely Standard/Loop/Timelapse/Superlapse |
 | d0a0 | `/main/other/d0a0` | MENU | 80 | **Movie Screen Size** (10,20,40,80,90) |
 | d0aa | `/main/other/d0aa` | MENU | 0 | **Wind Noise Reduction** (0/1) |
 | d320 | `/main/other/d320` | MENU | 2 | Unknown (0-3) |
@@ -558,9 +558,11 @@ Note: WiFi features not accessible via USB gphoto2 - requires separate implement
 
 ### 10.1 Investigation Needed
 1. **PTP/IP over WiFi** - Can we connect via WiFi and use PTP?
-2. **Movie Mode values** - What do d304 values 0-3 correspond to?
-3. **Full format vs Quick format** - Is there a difference?
-4. **Progress events** - Can we get format progress?
+2. **Movie Mode values (d304)** - The camera supports Standard, Loop, Timelapse, and Superlapse modes. What do values 0-3 correspond to?
+3. **Movie Loop Length interaction** - Does movielooplength only affect Loop Recording mode, or all recording?
+4. **Movie Screen Size values (d0a0)** - How do values 10/20/40/80/90 map to resolutions?
+5. **Full format vs Quick format** - Is there a difference?
+6. **Progress events** - Can we get format progress?
 
 ### 10.2 Potential Enhancements
 1. **HDR/DNG support** - Does camera support raw capture?

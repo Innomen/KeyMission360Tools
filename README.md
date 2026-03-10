@@ -78,7 +78,8 @@ Features:
 - ⚡ **Quick Actions** - Sync time, format SD, WiFi config
 - ⚙️ **Camera Settings** - White balance, movie mode, etc.
 - ℹ️ **Camera Info** - Battery, storage, firmware version
-- 🚧 **Coming Soon** - 360° viewer, YouTube export, video player
+- 👁️ **360° Viewer** - Interactive photo/video viewer
+- ▶️ **YouTube Export** - Inject 360° metadata for upload
 
 ### 2. Fix Date/Time (Most Important!)
 
@@ -170,7 +171,7 @@ gphoto2 --list-files
 - `capturetarget` - Save to `Internal RAM` or `Memory card`
 - `autofocus` - On/Off
 - `whitebalance` - Automatic, Daylight, Fluorescent, Tungsten
-- `movielooplength` - 5, 10, 30, 60 seconds
+- `movielooplength` - 5, 10, 30, 60 seconds (likely for loop recording/dashcam mode buffer)
 - `liveviewafmode` - Face-priority AF or Wide-area AF
 - `thumbsize` - normal or large
 - `fastfs` - Fast filesystem toggle
@@ -188,7 +189,7 @@ gphoto2 --list-files
 - `deviceversion` - Firmware version
 
 ### Nikon Vendor Extensions (Writable!)
-- `d304` - Movie Capture Mode (0-3)
+- `d304` - Movie Capture Mode (0-3) - Unknown values: likely Standard, Loop, Timelapse, Superlapse
 - `d0a0` - Movie Screen Size (10, 20, 40, 80, 90)
 - `d0aa` - Wind Noise Reduction (0/1)
 - `d338` - Camera Name/SSID (text)

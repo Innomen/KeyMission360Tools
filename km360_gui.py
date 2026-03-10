@@ -11,7 +11,8 @@ Features:
 - Camera settings configuration
 - Date/time synchronization
 - SD card formatting
-- (Planned: 360° viewer, YouTube export, video player)
+- 360° image/video viewer
+- YouTube 360° metadata export
 
 Author: KeyMission 360 Tools Project
 License: MIT
@@ -34,9 +35,6 @@ APP_NAME = "KeyMission 360 Linux Utility"
 
 # Placeholder features for future versions
 PLACEHOLDER_FEATURES = {
-    "360_viewer": "360° Image Viewer - Coming in v2.0",
-    "youtube_export": "YouTube Export - Coming in v2.0", 
-    "video_player": "Video Player - Coming in v2.0",
     "batch_ops": "Batch Operations - Coming in v2.0",
     "advanced_settings": "Advanced Settings - Coming in v2.0",
     "tethered": "Tethered Shooting - Coming in v2.0",
@@ -123,13 +121,7 @@ class KM360GUI:
         tools_menu.add_command(label="Download Manager", command=self.show_download_manager)
         tools_menu.add_separator()
         
-        # Placeholder features
-        tools_menu.add_command(label="🚧 360° Image Viewer", 
-                              command=lambda: self.show_placeholder("360° Image Viewer"))
-        tools_menu.add_command(label="🚧 YouTube Export", 
-                              command=lambda: self.show_placeholder("YouTube Export"))
-        tools_menu.add_command(label="🚧 Video Player", 
-                              command=lambda: self.show_placeholder("Video Player"))
+        # Placeholder features (not yet implemented)
         tools_menu.add_command(label="🚧 Batch Operations", 
                               command=lambda: self.show_placeholder("Batch Operations"))
         tools_menu.add_separator()
@@ -504,6 +496,8 @@ class KM360GUI:
         # Movie Loop Length
         loop_frame = ttk.LabelFrame(scrollable_frame, text="Movie Loop Length", padding=10)
         loop_frame.pack(fill=tk.X, pady=5)
+        ttk.Label(loop_frame, text="⚠️ Unknown: Likely controls loop recording buffer duration (dashcam mode).",
+                 font=("Arial", 9, "italic"), foreground="orange", wraplength=400).pack(anchor=tk.W)
         self.loop_var = tk.StringVar(value="5")
         for value, label in [("0", "5 seconds"), ("1", "10 seconds"), 
                             ("2", "30 seconds"), ("3", "60 seconds")]:
@@ -553,12 +547,14 @@ class KM360GUI:
         self.info_text.insert(tk.END, "- File download and management\n")
         self.info_text.insert(tk.END, "- Date/time synchronization\n")
         self.info_text.insert(tk.END, "- Camera settings configuration\n")
-        self.info_text.insert(tk.END, "- SD card formatting\n\n")
+        self.info_text.insert(tk.END, "- SD card formatting\n")
+        self.info_text.insert(tk.END, "- 360° image/video viewer\n")
+        self.info_text.insert(tk.END, "- YouTube 360° metadata export\n\n")
         self.info_text.insert(tk.END, "Planned (v2.0):\n")
-        self.info_text.insert(tk.END, "- 360° Image Viewer\n")
-        self.info_text.insert(tk.END, "- YouTube Export\n")
-        self.info_text.insert(tk.END, "- Video Player\n")
         self.info_text.insert(tk.END, "- Batch Operations\n")
+        self.info_text.insert(tk.END, "- Advanced Settings panel\n")
+        self.info_text.insert(tk.END, "- Tethered Shooting\n")
+        self.info_text.insert(tk.END, "- GPS Data Editor\n")
         self.info_text.configure(state=tk.DISABLED)
     
     def setup_viewer_tab(self):
@@ -803,33 +799,33 @@ class KM360GUI:
     def get_placeholder_features(self, feature_key):
         """Get feature list for placeholder tabs"""
         features = {
-            "360_viewer": [
-                "Equirectangular image display",
-                "Mouse drag to pan around",
-                "Zoom in/out",
-                "Split-screen mode",
-                "Export current view"
-            ],
-            "youtube_export": [
-                "Re-encode video for YouTube",
-                "Inject 360° metadata",
-                "Quality presets",
-                "Batch processing",
-                "Upload assistant"
-            ],
-            "video_player": [
-                "MP4 playback",
-                "Highlight tag navigation",
-                "Trim and split",
-                "Frame extraction",
-                "360° video playback"
-            ],
             "batch_ops": [
                 "Batch rename files",
                 "Batch convert formats",
                 "Batch delete",
                 "Batch metadata edit",
                 "Batch download"
+            ],
+            "advanced_settings": [
+                "Detailed camera configuration",
+                "Custom presets",
+                "Firmware management",
+                "Network settings",
+                "Advanced troubleshooting"
+            ],
+            "tethered": [
+                "Live view on computer",
+                "Remote shutter control",
+                "Instant download to PC",
+                "Time-lapse shooting",
+                "Multi-camera sync"
+            ],
+            "gps": [
+                "Edit GPS coordinates",
+                "View track logs",
+                "Geotag photos",
+                "Export to GPX",
+                "Map visualization"
             ]
         }
         return features.get(feature_key, ["Feature details coming soon"])
