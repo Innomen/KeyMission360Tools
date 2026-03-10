@@ -1,46 +1,53 @@
-# KeyMission 360 Formatter
+# KeyMission 360 Tools
 
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-A Python tool to format the SD card of a **Nikon KeyMission 360** camera via USB using raw PTP (Picture Transfer Protocol) commands.
+A comprehensive toolkit for the **Nikon KeyMission 360** camera, providing direct USB/PTP communication, SD card formatting, camera control via gphoto2, and complete device configuration.
 
 ## 🎯 Purpose
 
-The Nikon KeyMission 360 has a known issue where the SD card can become corrupted or show as "unformatted" through the camera's interface. This tool allows you to format the memory card directly via USB, bypassing the camera's limited button interface.
+The Nikon KeyMission 360 has limited physical controls (only 2 buttons) and can be difficult to manage when the SD card becomes corrupted or when you need to change advanced settings. This toolkit provides:
 
-## ⚡ Features
+- **SD Card Formatting** - Direct PTP format command bypassing camera menus
+- **Date/Time Sync** - Fix incorrect timestamps on your photos
+- **Complete Camera Control** - Access all 80+ camera settings via gphoto2
+- **File Management** - Download/upload/delete files
+- **WiFi Configuration** - Change camera's WiFi password and IP settings
+- **Raw PTP Commands** - Full low-level camera access
 
-- ✨ **Direct USB Communication** - Uses raw PTP protocol over USB bulk endpoints
-- 🔍 **Auto-Detection** - Automatically finds the camera and identifies storage devices
-- 🛡️ **Safety First** - Confirmation prompt before formatting (unless `--force` is used)
-- 📋 **Storage Listing** - Can list storage devices without formatting
-- 🔧 **Manual Storage Selection** - Override auto-detection with specific storage IDs
+## 📁 Repository Contents
 
-## 📋 Requirements
+| File | Description |
+|------|-------------|
+| `km360_formatter.py` | Format SD card via raw PTP commands |
+| `km360_info.py` | Display camera information and PTP endpoints |
+| `manual_format.sh` | Format SD card manually (without camera) |
+| `GPHOTO2_COMMANDS.md` | Complete gphoto2 command reference |
+| `RESEARCH.md` | Technical PTP protocol documentation |
 
-- Python 3.8 or higher
-- USB access permissions (see Installation)
-- Nikon KeyMission 360 camera connected via USB
+## 🚀 Quick Start
 
-## 🚀 Installation
-
-### 1. Clone or Download
-
-```bash
-git clone https://github.com/yourusername/KeyMission360Formatter.git
-cd KeyMission360Formatter
-```
-
-### 2. Install Dependencies
+### Prerequisites
 
 ```bash
+# Install Python dependencies
 pip install -r requirements.txt
+
+# Install gphoto2 (for advanced features)
+# Ubuntu/Debian:
+sudo apt-get install gphoto2
+
+# Fedora:
+sudo dnf install gphoto2
+
+# macOS:
+brew install gphoto2
 ```
 
-### 3. Set USB Permissions (Linux)
+### USB Permissions (Linux)
 
-Create a udev rule to allow non-root access:
+Create a udev rule for non-root access:
 
 ```bash
 sudo tee /etc/udev/rules.d/99-keymission360.rules << 'EOF'
@@ -48,167 +55,200 @@ sudo tee /etc/udev/rules.d/99-keymission360.rules << 'EOF'
 SUBSYSTEM=="usb", ATTR{idVendor}=="04b0", ATTR{idProduct}=="019f", MODE="0666", GROUP="plugdev"
 EOF
 
-# Reload rules
 sudo udevadm control --reload-rules
 sudo udevadm trigger
-```
-
-Then add your user to the `plugdev` group:
-```bash
 sudo usermod -a -G plugdev $USER
 # Log out and back in for changes to take effect
 ```
 
 ## 📖 Usage
 
-### Basic Usage
+### 1. Format SD Card (Python Tool)
 
-Format the memory card with auto-detection:
-
-```bash
-python km360_formatter.py
-```
-
-### List Storage Devices
-
-Just see what storage devices are available:
+The most reliable way to format when the camera's interface isn't working:
 
 ```bash
-python km360_formatter.py --list
+# Auto-detect and format
+python3 km360_formatter.py
+
+# List storage devices only
+python3 km360_formatter.py --list
+
+# Format without confirmation (DANGEROUS)
+python3 km360_formatter.py --force
 ```
 
-Output:
-```
-============================================================
-Nikon KeyMission 360 Memory Card Formatter
-============================================================
-
-[✓] Found Nikon KeyMission 360 at Bus 3 Device 15
-[*] Interface 0 claimed
-[*] Bulk endpoints: OUT=0x01, IN=0x82
-
-[+] Opening PTP session...
-[✓] Session opened (code: 0x201e)
-
-[+] Querying storage devices...
-[*] Found 2 storage device(s)
-    Storage 1: 0x00000001
-    Storage 2: 0x00010001
-[*] Interface released
-```
-
-### Format Specific Storage
-
-If you need to format a specific storage device:
+### 2. Camera Information
 
 ```bash
-python km360_formatter.py --storage 0x00010001
+python3 km360_info.py
 ```
 
-### Force Format (No Confirmation)
+### 3. gphoto2 Commands
 
-⚠️ **DANGEROUS** - This will erase all data without asking!
+The camera exposes 80+ settings via gphoto2. See [GPHOTO2_COMMANDS.md](GPHOTO2_COMMANDS.md) for the complete reference.
+
+#### Quick Examples:
 
 ```bash
-python km360_formatter.py --force
+# Fix incorrect date/time on photos
+gphoto2 --set-config datetime=now
+
+# Start/stop video recording
+gphoto2 --set-config movie=1  # Start
+gphoto2 --set-config movie=0  # Stop
+
+# Change WiFi password
+gphoto2 --set-config /main/other/d340=MyNewPassword
+
+# Change camera name (SSID)
+gphoto2 --set-config /main/other/d338=MyCamera360
+
+# Set copyright info in photos
+gphoto2 --set-config /main/other/501f="© 2026 Your Name"
+
+# Download all photos
+gphoto2 --get-all-files
+
+# Take a photo
+gphoto2 --capture-image
+
+# List all files
+gphoto2 --list-files
 ```
 
-## 🔬 Technical Details
+## 🔧 All Available Settings
 
-### How It Works
+### Actions (Triggers)
+- `bulb` - Long exposure mode
+- `autofocusdrive` - Trigger autofocus
+- `movie` - Start/stop video recording
+- `viewfinder` - Enable live view
+- `opcode` - Send raw PTP commands
 
-1. **USB Connection** - Opens a direct USB connection to the camera
-2. **PTP Session** - Opens a PTP (Picture Transfer Protocol) session
-3. **Storage Discovery** - Queries available storage devices (returns IDs like `0x00010001` for the SD card)
-4. **Format Command** - Sends the `FormatStore (0x100F)` PTP command
-5. **Wait & Verify** - Waits for the camera to complete formatting and returns status
+### Settings (Read/Write)
+- `datetime` - Camera date/time (use `now` for current time)
+- `capturetarget` - Save to `Internal RAM` or `Memory card`
+- `autofocus` - On/Off
+- `whitebalance` - Automatic, Daylight, Fluorescent, Tungsten
+- `movielooplength` - 5, 10, 30, 60 seconds
+- `liveviewafmode` - Face-priority AF or Wide-area AF
+- `thumbsize` - normal or large
+- `fastfs` - Fast filesystem toggle
 
-### Storage IDs
+### Image Settings (Read-Only)
+- `iso` - ISO 100-25600
+- `exposurecompensation` - -2 to +2 stops
+- `expprogram` - M, P, A, S, Auto modes
+- `shutterspeed2` - 30s to 1/32000
 
-The KeyMission 360 exposes two storage devices:
+### Status (Read-Only)
+- `batterylevel` - Battery percentage
+- `availableshots` - Number of photos remaining
+- `serialnumber` - Camera serial number
+- `deviceversion` - Firmware version
 
-| Storage ID | Description |
-|------------|-------------|
-| `0x00000001` | Internal storage/RAM |
-| `0x00010001` | **SD Card** (this is what you want to format) |
+### Nikon Vendor Extensions (Writable!)
+- `d304` - Movie Capture Mode (0-3)
+- `d0a0` - Movie Screen Size (10, 20, 40, 80, 90)
+- `d0aa` - Wind Noise Reduction (0/1)
+- `d338` - Camera Name/SSID (text)
+- `d340` - WiFi Password (text!)
+- `d341` - WiFi Channel (1-11)
+- `d342` - IP Address (text)
+- `d343` - Subnet Mask (text)
+- `d323` - Movie Loop Length (50, 100, 300, 600)
+- `501f` - Copyright Info (text)
 
-### PTP Protocol
+## 🛠️ Alternative: Manual SD Card Format
 
-The tool constructs raw PTP packets:
+If you prefer to format the SD card without the camera:
 
-```
-FormatStore Command (16 bytes):
-  10 00 00 00  - Length (16)
-  01 00        - Type (Command)
-  0F 10        - Opcode (0x100F = FormatStore)
-  03 00 00 00  - Transaction ID
-  01 00 01 00  - Storage ID (0x00010001)
-```
-
-See [RESEARCH.md](RESEARCH.md) for complete protocol documentation.
-
-## 🛠️ Alternative: Manual Format Without Camera
-
-If you prefer to format the SD card without the camera, you can use standard tools. The camera expects a **FAT32** filesystem:
-
-### Linux
 ```bash
 # Find your SD card (BE CAREFUL!)
 lsblk
 
-# Example: /dev/sdc1
-DEVICE="/dev/sdc1"
+# Example: /dev/sdc
+DEVICE="/dev/sdc"
 
 # Unmount
-sudo umount $DEVICE
+sudo umount ${DEVICE}* 2>/dev/null
 
-# Format FAT32 with 32KB clusters (optimal for video)
-sudo mkfs.vfat -F 32 -s 64 -n "KM360" $DEVICE
+# Create partition table and FAT32 partition
+sudo parted -s $DEVICE mklabel msdos
+sudo parted -s $DEVICE mkpart primary fat32 1MiB 100%
+sudo partprobe $DEVICE
+
+# Format with optimal settings for video
+sudo mkfs.vfat -F 32 -s 64 -n "KM360" ${DEVICE}1
 ```
 
-### macOS
+Or use the included script:
 ```bash
-# Find disk
-diskutil list
-
-# Format (example: disk2s1)
-sudo diskutil eraseDisk FAT32 KM360 MBRFormat /dev/disk2
+./manual_format.sh
 ```
 
-### Windows
-```powershell
-# In Command Prompt (Admin)
-format F: /FS:FAT32 /V:KM360
-```
+## ⚠️ Safety Notes
 
-**Note**: While manual formatting works, the camera may write additional metadata during its native format process. For best compatibility, use the PTP format method or format in-camera.
+- **Formatting erases all data** - The formatter has a confirmation prompt
+- **Quick format only** - Data may be recoverable with specialized tools
+- **Battery level** - Ensure camera has charge before formatting
+- **WiFi password** - Changing `d340` will affect the SnapBridge app connection
 
-## ⚠️ Warnings & Limitations
+## 📊 Camera Specifications
 
-- **Data Loss**: Formatting will erase ALL data on the memory card
-- **Quick Format**: This performs a quick format (file system reset), not a secure erase
-- **Camera-Specific**: This tool is designed for the Nikon KeyMission 360. Other cameras may use different storage IDs
-- **USB Only**: Requires USB connection; does not work over Wi-Fi
+| Property | Value |
+|----------|-------|
+| USB Vendor ID | 0x04B0 (Nikon Corp.) |
+| USB Product ID | 0x019F |
+| Firmware | KeyMission 360 Ver.1.3 |
+| PTP Standard | PIMA 15740 |
+| Storage IDs | 0x00000001 (Internal), 0x00010001 (SD Card) |
+| Video Resolutions | 4K/24fps, 1080p/60fps, etc. |
+| Photo Resolution | 7744 × 3872 (30 MP) |
+
+## 🔬 Technical Details
+
+The camera supports:
+- **File Download, Deletion, Upload**
+- **Generic Image Capture**
+- **Nikon Capture 3**
+- **Live View**
+- **Movie Recording**
+
+The raw PTP formatter uses:
+- `0x1002` - OpenSession
+- `0x1004` - GetStorageIDs
+- `0x100F` - FormatStore (the magic command)
+
+See [RESEARCH.md](RESEARCH.md) for complete protocol documentation.
 
 ## 🐛 Troubleshooting
 
 ### "Camera not found"
-- Ensure the camera is connected via USB
-- Check that the camera is in PTP mode (not Mass Storage mode)
-- Try unplugging and reconnecting the USB cable
+- Ensure camera is connected via USB
+- Make sure camera is powered on (press Photo or Video button)
+- Try unplugging and reconnecting USB
+- Check USB permissions (udev rules)
 
 ### "Could not claim interface"
-- Another program (like gphoto2, file manager) may be using the camera
-- Kill any competing processes: `killall gphoto2 gvfs-gphoto2-volume-monitor`
+- Another program may be using the camera
+- Kill competing processes: `killall gphoto2 gvfs-gphoto2-volume-monitor`
 
 ### "Invalid Storage ID"
-- The storage ID may have changed; use `--list` to see current IDs
-- Try unplugging and reconnecting the camera
+- Use `--list` to see current storage IDs
+- Try unplugging and reconnecting
 
-### "Device is busy"
-- The camera may be processing something
-- Wait a moment and try again
-- Check that the camera isn't in the middle of another operation
+### Date/time reverts to 2016
+- The camera has no RTC battery
+- You must set datetime each time it powers on: `gphoto2 --set-config datetime=now`
+
+## 📚 Further Reading
+
+- [GPHOTO2_COMMANDS.md](GPHOTO2_COMMANDS.md) - Complete command reference
+- [RESEARCH.md](RESEARCH.md) - PTP protocol reverse engineering
+- [PTP Specification](http://www.ntfs.com/img/15740-3.pdf) - PIMA 15740 spec
+- [libgphoto2](https://github.com/gphoto/libgphoto2) - gphoto2 source
 
 ## 📄 License
 
@@ -216,15 +256,10 @@ MIT License - See [LICENSE](LICENSE) file
 
 ## 🙏 Acknowledgments
 
-- [libgphoto2](https://github.com/gphoto/libgphoto2) team for PTP protocol documentation
-- [pyusb](https://github.com/pyusb/pyusb) project for USB access
-- Nikon for making interesting cameras with documented protocols
-
-## 📚 Further Reading
-
-- [RESEARCH.md](RESEARCH.md) - Complete technical documentation of the PTP protocol implementation
-- [PTP Specification](http://www.ntfs.com/img/15740-3.pdf) - PTP Specification (PIMA 15740)
+- [libgphoto2](https://github.com/gphoto/libgphoto2) team for PTP support
+- Nikon for documented PTP protocols
+- The KeyMission 360 community for testing
 
 ---
 
-**Disclaimer**: This tool is not affiliated with or endorsed by Nikon Corporation. Use at your own risk. The authors are not responsible for data loss or camera damage.
+**Disclaimer**: This tool is not affiliated with or endorsed by Nikon Corporation. Use at your own risk.

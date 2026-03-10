@@ -405,6 +405,179 @@ Response: 0C 00 00 00 03 00 01 20 03 00 00 00
 
 ---
 
-*Document Version: 1.0*
-*Date: 2026-03-09*
+## 11. gphoto2 Complete Feature Discovery
+
+### 11.1 Overview
+
+Using gphoto2, the KeyMission 360 exposes **80+ configurable properties** across multiple categories:
+
+- **7 Actions** - Trigger commands (bulb, movie, autofocus, etc.)
+- **6 Settings** - Read/write camera settings (datetime, whitebalance, etc.)
+- **8 Status** - Read-only information (battery, serial number, etc.)
+- **4 Image Settings** - ISO, exposure, white balance
+- **5 Capture Settings** - Movie mode, AF mode, exposure program
+- **50+ Nikon Vendor Extensions** - Low-level PTP properties
+
+### 11.2 Notable Writable Properties
+
+| Property | Address | Type | Description |
+|----------|---------|------|-------------|
+| datetime | /main/settings/datetime | DATE | Set camera time (use `now`) |
+| movie | /main/actions/movie | TOGGLE | Start/stop recording |
+| whitebalance | /main/imgsettings/whitebalance | RADIO | Auto/Daylight/Fluorescent/Tungsten |
+| movielooplength | /main/capturesettings/movielooplength | RADIO | 5/10/30/60 seconds |
+| capturetarget | /main/settings/capturetarget | RADIO | Internal RAM or Memory card |
+| d304 | /main/other/d304 | MENU | Movie Capture Mode (0-3) |
+| d0aa | /main/other/d0aa | MENU | Wind Noise Reduction (0/1) |
+| d323 | /main/other/d323 | MENU | Movie Loop Length (50/100/300/600) |
+| d338 | /main/other/d338 | TEXT | Camera Name/SSID |
+| **d340** | **/main/other/d340** | **TEXT** | **WiFi Password** |
+| d341 | /main/other/d341 | MENU | WiFi Channel (1-11) |
+| d342 | /main/other/d342 | TEXT | IP Address |
+| d343 | /main/other/d343 | TEXT | Subnet Mask |
+| 501f | /main/other/501f | TEXT | Copyright Info |
+
+### 11.3 Date/Time Behavior
+
+**Critical Finding**: The KeyMission 360 has **no RTC (Real-Time Clock) battery**. 
+
+- Date/time resets to factory default (2016-01-01) when battery is removed
+- Must set datetime each time camera powers on: `gphoto2 --set-config datetime=now`
+- This explains why photos appear with 2016 timestamps
+
+### 11.4 WiFi Configuration
+
+The camera's WiFi settings are fully accessible:
+
+```bash
+# View current settings
+gphoto2 --get-config /main/other/d338  # SSID
+gphoto2 --get-config /main/other/d340  # Password
+gphoto2 --get-config /main/other/d342  # IP
+gphoto2 --get-config /main/other/d343  # Netmask
+
+# Modify settings
+gphoto2 --set-config /main/other/d338=MyCamera360
+gphoto2 --set-config /main/other/d340=NewPassword123
+gphoto2 --set-config /main/other/d341=6  # Channel
+gphoto2 --set-config /main/other/d342=192.168.1.50
+```
+
+**Warning**: Changing the WiFi password (`d340`) will break existing SnapBridge pairings.
+
+### 11.5 Movie Recording Control
+
+Two methods to control video recording:
+
+**Method 1: gphoto2 movie toggle**
+```bash
+gphoto2 --set-config movie=1  # Start
+gphoto2 --set-config movie=0  # Stop
+```
+
+**Method 2: gphoto2 capture-movie**
+```bash
+gphoto2 --capture-movie=30s  # Record 30 seconds
+```
+
+### 11.6 Storage Information
+
+```bash
+gphoto2 --storage-info
+```
+
+Output shows:
+- **store_00010001**: Removable RAM (SD Card)
+  - Capacity: 29,652 MB (~30 GB)
+  - Free: 29,629 MB
+  - Filesystem: DCIM (Digital Camera Layout)
+
+### 11.7 Comparison: Raw PTP vs gphoto2
+
+| Operation | Raw PTP (Python) | gphoto2 |
+|-----------|------------------|---------|
+| Format SD | `0x100f` command | `opcode` config |
+| Get storage | `0x1004` command | `--storage-info` |
+| Set datetime | `0x1014` command | `datetime=now` |
+| Take photo | `0x100e` command | `--capture-image` |
+| Download | `0x1009` command | `--get-all-files` |
+
+**Advantage of gphoto2**: Higher-level interface, handles session management
+**Advantage of raw PTP**: More control, works when gphoto2 has issues
+
+### 11.8 Firmware Version
+
+Detected firmware: **KeyMission 360 Ver.1.3**
+
+Properties observed may vary with firmware updates.
+
+---
+
+## Appendix B: gphoto2 Property Reference
+
+### B.1 Action Commands
+
+```
+/main/actions/bulb                    - Bulb mode toggle
+/main/actions/autofocusdrive          - Trigger AF
+/main/actions/changeafarea            - Change AF area
+/main/actions/controlmode             - Set control mode
+/main/actions/viewfinder              - Live view toggle
+/main/actions/movie                   - Movie record toggle
+/main/actions/opcode                  - Raw PTP opcode
+```
+
+### B.2 Standard PTP Opcodes via gphoto2
+
+| Opcode | Name | gphoto2 Equivalent |
+|--------|------|-------------------|
+| 0x1001 | GetDeviceInfo | `--summary` |
+| 0x1002 | OpenSession | (automatic) |
+| 0x1003 | CloseSession | (automatic) |
+| 0x1004 | GetStorageIDs | `--storage-info` |
+| 0x1005 | GetStorageInfo | `--storage-info` |
+| 0x100f | FormatStore | `opcode` config |
+| 0x1014 | SetDevicePropValue | `--set-config` |
+| 0x1015 | GetDevicePropValue | `--get-config` |
+| 0x1016 | ResetDevicePropValue | (various) |
+
+---
+
+## 12. Complete Command Summary
+
+### Essential Commands
+
+```bash
+# Connect and verify
+gphoto2 --auto-detect
+gphoto2 --summary
+
+# Fix datetime (critical - no RTC battery!)
+gphoto2 --set-config datetime=now
+
+# Manage files
+gphoto2 --list-files
+gphoto2 --get-all-files
+gphoto2 --delete-all-files
+
+# Capture
+gphoto2 --capture-image
+gphoto2 --capture-image-and-download
+gphoto2 --set-config movie=1 && sleep 10 && gphoto2 --set-config movie=0
+
+# WiFi config
+gphoto2 --set-config /main/other/d340=NewPassword
+gphoto2 --set-config /main/other/d338=MyCamera
+
+# Settings
+gphoto2 --set-config whitebalance=1          # Daylight
+gphoto2 --set-config movielooplength=2       # 30 seconds
+gphoto2 --set-config capturetarget=1         # Memory card
+```
+
+---
+
+*Document Version: 2.0*
+*Date: 2026-03-10*
 *Researcher: AI Assistant / Claude Code*
+*Updates: Added complete gphoto2 property discovery, WiFi config, datetime behavior*
