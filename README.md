@@ -21,6 +21,7 @@ The Nikon KeyMission 360 has limited physical controls (only 2 buttons) and can 
 | File | Description |
 |------|-------------|
 | `km360_formatter.py` | Format SD card via raw PTP commands |
+| `km360_set_time.py` | **Sync camera time to system time** (fixes 2016 timestamp issue) |
 | `km360_info.py` | Display camera information and PTP endpoints |
 | `manual_format.sh` | Format SD card manually (without camera) |
 | `GPHOTO2_COMMANDS.md` | Complete gphoto2 command reference |
@@ -63,7 +64,27 @@ sudo usermod -a -G plugdev $USER
 
 ## 📖 Usage
 
-### 1. Format SD Card (Python Tool)
+### 1. Fix Date/Time (Most Important!)
+
+**The KeyMission 360 has NO RTC battery!** When the battery dies or is removed, the camera forgets the date/time and reverts to 2016. This causes all your photos to have wrong timestamps.
+
+```bash
+# Sync camera time to your computer's time
+python3 km360_set_time.py
+
+# Check current camera time without changing
+python3 km360_set_time.py --check
+
+# Quiet mode (minimal output)
+python3 km360_set_time.py --quiet
+```
+
+**Run this every time you:**
+- Insert a fresh battery
+- See photos with 2015/2016 timestamps
+- Haven't used the camera in a while
+
+### 2. Format SD Card (Python Tool)
 
 The most reliable way to format when the camera's interface isn't working:
 
@@ -78,7 +99,7 @@ python3 km360_formatter.py --list
 python3 km360_formatter.py --force
 ```
 
-### 2. Camera Information
+### 3. Camera Information
 
 ```bash
 python3 km360_info.py
@@ -91,7 +112,9 @@ The camera exposes 80+ settings via gphoto2. See [GPHOTO2_COMMANDS.md](GPHOTO2_C
 #### Quick Examples:
 
 ```bash
-# Fix incorrect date/time on photos
+# FIX DATE/TIME FIRST (camera has no RTC battery!)
+python3 km360_set_time.py
+# OR
 gphoto2 --set-config datetime=now
 
 # Start/stop video recording
@@ -241,7 +264,8 @@ See [RESEARCH.md](RESEARCH.md) for complete protocol documentation.
 
 ### Date/time reverts to 2016
 - The camera has no RTC battery
-- You must set datetime each time it powers on: `gphoto2 --set-config datetime=now`
+- **Use the time sync tool:** `python3 km360_set_time.py`
+- Or manually: `gphoto2 --set-config datetime=now`
 
 ## 📚 Further Reading
 
