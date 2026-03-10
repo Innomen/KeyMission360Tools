@@ -229,6 +229,177 @@ class KM360GUI:
                   command=self.download_all).pack(side=tk.LEFT, padx=(0, 5))
         ttk.Button(btn_frame, text="Delete", 
                   command=self.delete_selected).pack(side=tk.LEFT)
+        
+        # Setup right-click context menu
+        self.setup_file_context_menu()
+    
+    def setup_file_context_menu(self):
+        """Setup right-click context menu for file browser"""
+        # Create context menu
+        self.file_context_menu = tk.Menu(self.root, tearoff=0)
+        self.file_context_menu.add_command(label="👁️ View in 360° Viewer", 
+                                          command=self.view_selected_in_viewer)
+        self.file_context_menu.add_command(label="▶️ Export for YouTube", 
+                                          command=self.export_selected_for_youtube)
+        self.file_context_menu.add_separator()
+        self.file_context_menu.add_command(label="⬇️ Download", 
+                                          command=self.download_selected)
+        self.file_context_menu.add_command(label="🗑️ Delete", 
+                                          command=self.delete_selected)
+        self.file_context_menu.add_separator()
+        self.file_context_menu.add_command(label="📋 Copy Filename", 
+                                          command=self.copy_filename)
+        
+        # Bind right-click to show menu
+        self.file_tree.bind("<Button-3>", self.show_file_context_menu)  # Linux/Windows
+        self.file_tree.bind("<Control-Button-1>", self.show_file_context_menu)  # Mac
+    
+    def show_file_context_menu(self, event):
+        """Show context menu on right-click"""
+        # Select item under cursor
+        item = self.file_tree.identify_row(event.y)
+        if item:
+            # If not already selected, select this item
+            if item not in self.file_tree.selection():
+                self.file_tree.selection_set(item)
+            
+            # Show menu
+            self.file_context_menu.post(event.x_root, event.y_root)
+    
+    def get_selected_file_info(self):
+        """Get file number and name for selected item"""
+        selected = self.file_tree.selection()
+        if not selected:
+            return None, None
+        
+        item = selected[0]
+        idx = self.file_tree.index(item) + 1  # File numbers are 1-indexed
+        values = self.file_tree.item(item, 'values')
+        name = values[0] if values else f"file_{idx}"
+        
+        return idx, name
+    
+    def view_selected_in_viewer(self):
+        """Download and view selected file in 360° viewer"""
+        idx, name = self.get_selected_file_info()
+        if not idx:
+            return
+        
+        # Check if it's an image or video
+        ext = name.lower().split('.')[-1] if '.' in name else ''
+        if ext not in ['jpg', 'jpeg', 'png', 'mp4', 'mov', 'avi']:
+            messagebox.showinfo("Not Supported", 
+                "360° Viewer only supports images and videos.\n\n"
+                f"File: {name}")
+            return
+        
+        # Download to temp location
+        import tempfile
+        temp_dir = tempfile.gettempdir()
+        temp_path = os.path.join(temp_dir, name)
+        
+        self.set_status(f"Downloading {name} for viewing...")
+        
+        def download_and_view():
+            try:
+                # Download file
+                result = subprocess.run(
+                    ["gphoto2", "--get-file", str(idx), f"--filename={temp_path}"],
+                    capture_output=True, timeout=60
+                )
+                
+                if result.returncode == 0 and os.path.exists(temp_path):
+                    self.set_status(f"Opening {name} in viewer...")
+                    # Launch viewer with file
+                    subprocess.Popen(["python3", "km360_viewer.py", temp_path])
+                else:
+                    self.set_status("Failed to download file")
+                    messagebox.showerror("Error", "Failed to download file from camera.")
+            except Exception as e:
+                self.set_status(f"Error: {str(e)}")
+        
+        threading.Thread(target=download_and_view).start()
+    
+    def export_selected_for_youtube(self):
+        """Download and export selected video for YouTube"""
+        idx, name = self.get_selected_file_info()
+        if not idx:
+            return
+        
+        # Check if it's a video
+        ext = name.lower().split('.')[-1] if '.' in name else ''
+        if ext not in ['mp4', 'mov', 'avi']:
+            messagebox.showinfo("Not a Video", 
+                "YouTube Export only works with video files.\n\n"
+                f"File: {name}")
+            return
+        
+        # Ask where to save
+        output_path = filedialog.asksaveasfilename(
+            title="Export for YouTube",
+            defaultextension=".mp4",
+            initialfile=name.replace(f".{ext}", "_youtube.mp4"),
+            filetypes=[("MP4 files", "*.mp4"), ("All files", "*.*")]
+        )
+        
+        if not output_path:
+            return
+        
+        # Download to temp, then export
+        import tempfile
+        temp_dir = tempfile.gettempdir()
+        temp_path = os.path.join(temp_dir, name)
+        
+        self.set_status(f"Downloading {name}...")
+        
+        def download_and_export():
+            try:
+                # Download
+                result = subprocess.run(
+                    ["gphoto2", "--get-file", str(idx), f"--filename={temp_path}"],
+                    capture_output=True, timeout=120
+                )
+                
+                if result.returncode != 0 or not os.path.exists(temp_path):
+                    self.set_status("Download failed")
+                    messagebox.showerror("Error", "Failed to download video from camera.")
+                    return
+                
+                # Export for YouTube
+                self.set_status("Injecting 360° metadata...")
+                result = subprocess.run(
+                    ["python3", "km360_youtube_export.py", temp_path, output_path],
+                    capture_output=True, text=True, timeout=60
+                )
+                
+                if result.returncode == 0:
+                    self.set_status("Export complete!")
+                    messagebox.showinfo("Success", 
+                        f"Video exported successfully!\n\n"
+                        f"Saved to: {output_path}\n\n"
+                        "Ready to upload to YouTube with 360° playback.")
+                else:
+                    self.set_status("Export failed")
+                    messagebox.showerror("Error", result.stderr)
+                
+                # Cleanup temp file
+                try:
+                    os.remove(temp_path)
+                except:
+                    pass
+                    
+            except Exception as e:
+                self.set_status(f"Error: {str(e)}")
+        
+        threading.Thread(target=download_and_export).start()
+    
+    def copy_filename(self):
+        """Copy selected filename to clipboard"""
+        idx, name = self.get_selected_file_info()
+        if name:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(name)
+            self.set_status(f"Copied: {name}")
     
     def setup_tabs(self):
         """Setup tabbed interface"""
@@ -396,10 +567,29 @@ class KM360GUI:
         ttk.Label(info_frame, text="• Video playback with pause/play").pack(anchor=tk.W)
         
         btn_frame = ttk.Frame(tab)
-        btn_frame.pack(pady=30)
+        btn_frame.pack(pady=20)
         
         ttk.Button(btn_frame, text="Launch 360° Viewer", 
-                  command=self.launch_viewer).pack(pady=10)
+                  command=self.launch_viewer).pack(pady=5)
+        
+        # Quick access from camera files
+        quick_frame = ttk.LabelFrame(tab, text="Quick Open from Camera", padding=10)
+        quick_frame.pack(fill=tk.X, padx=20, pady=10)
+        
+        ttk.Label(quick_frame, text="Right-click any file in the Camera Files list → 'View in 360° Viewer'",
+                 foreground="blue").pack(pady=5)
+        
+        ttk.Label(quick_frame, text="Or select a file here:").pack(anchor=tk.W, pady=(10, 5))
+        
+        self.viewer_file_var = tk.StringVar()
+        self.viewer_file_combo = ttk.Combobox(quick_frame, textvariable=self.viewer_file_var, 
+                                              state="readonly", width=50)
+        self.viewer_file_combo.pack(fill=tk.X, pady=5)
+        
+        ttk.Button(quick_frame, text="🔄 Refresh File List", 
+                  command=self.refresh_viewer_file_list).pack(pady=5)
+        ttk.Button(quick_frame, text="👁️ Open Selected in Viewer", 
+                  command=self.open_viewer_file_combo).pack(pady=5)
         
         ttk.Label(tab, text="Or run from terminal: python3 km360_viewer.py [file]",
                  foreground="gray").pack(pady=10)
@@ -451,6 +641,73 @@ class KM360GUI:
             subprocess.Popen(["python3", "km360_viewer.py"])
         except Exception as e:
             messagebox.showerror("Error", f"Could not launch viewer: {e}")
+    
+    def refresh_viewer_file_list(self):
+        """Refresh the file list in the viewer tab combo box"""
+        if not self.connected:
+            messagebox.showwarning("Not Connected", "Please connect to camera first.")
+            return
+        
+        # Get all files from tree
+        files = []
+        for i, item in enumerate(self.file_tree.get_children(), 1):
+            values = self.file_tree.item(item, 'values')
+            if values:
+                name = values[0]
+                # Only include images and videos
+                ext = name.lower().split('.')[-1] if '.' in name else ''
+                if ext in ['jpg', 'jpeg', 'png', 'mp4', 'mov', 'avi']:
+                    files.append(f"{i}: {name}")
+        
+        self.viewer_file_combo['values'] = files
+        if files:
+            self.viewer_file_combo.set(files[0])
+            self.set_status(f"Loaded {len(files)} viewable files")
+        else:
+            self.viewer_file_combo.set("")
+            self.set_status("No viewable files found")
+    
+    def open_viewer_file_combo(self):
+        """Open selected file from combo box in viewer"""
+        selected = self.viewer_file_var.get()
+        if not selected:
+            messagebox.showinfo("No Selection", "Please select a file or refresh the list.")
+            return
+        
+        # Parse file number
+        try:
+            idx = int(selected.split(':')[0])
+        except:
+            messagebox.showerror("Error", "Invalid file selection")
+            return
+        
+        # Get filename
+        name = selected.split(':', 1)[1].strip() if ':' in selected else f"file_{idx}"
+        
+        # Download and view
+        import tempfile
+        temp_dir = tempfile.gettempdir()
+        temp_path = os.path.join(temp_dir, name)
+        
+        self.set_status(f"Downloading {name}...")
+        
+        def download_and_view():
+            try:
+                result = subprocess.run(
+                    ["gphoto2", "--get-file", str(idx), f"--filename={temp_path}"],
+                    capture_output=True, timeout=60
+                )
+                
+                if result.returncode == 0 and os.path.exists(temp_path):
+                    self.set_status(f"Opening {name}...")
+                    subprocess.Popen(["python3", "km360_viewer.py", temp_path])
+                else:
+                    self.set_status("Failed to download")
+                    messagebox.showerror("Error", "Failed to download file.")
+            except Exception as e:
+                self.set_status(f"Error: {str(e)}")
+        
+        threading.Thread(target=download_and_view).start()
     
     def browse_yt_file(self):
         """Browse for video file to export"""
