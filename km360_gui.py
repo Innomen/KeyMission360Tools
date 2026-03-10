@@ -264,7 +264,11 @@ class KM360GUI:
                 self.file_tree.selection_set(item)
             
             # Show menu
-            self.file_context_menu.post(event.x_root, event.y_root)
+            try:
+                self.file_context_menu.tk_popup(event.x_root, event.y_root)
+            finally:
+                # Ensure menu is closed when clicking elsewhere
+                self.file_context_menu.grab_release()
     
     def get_selected_file_info(self):
         """Get file number and name for selected item"""
