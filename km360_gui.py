@@ -253,6 +253,16 @@ class KM360GUI:
         # Bind right-click to show menu
         self.file_tree.bind("<Button-3>", self.show_file_context_menu)  # Linux/Windows
         self.file_tree.bind("<Control-Button-1>", self.show_file_context_menu)  # Mac
+        
+        # Bind click elsewhere to close menu
+        self.root.bind("<Button-1>", self.close_context_menu)
+    
+    def close_context_menu(self, event=None):
+        """Close context menu when clicking elsewhere"""
+        try:
+            self.file_context_menu.unpost()
+        except:
+            pass
     
     def show_file_context_menu(self, event):
         """Show context menu on right-click"""
