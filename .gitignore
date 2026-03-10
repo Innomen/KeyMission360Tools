@@ -46,3 +46,4 @@ temp/
 *.tmp
 extracted_installer/
 wine_prefix/
+*.exe
