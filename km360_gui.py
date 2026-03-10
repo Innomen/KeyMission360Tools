@@ -244,11 +244,11 @@ class KM360GUI:
         # Tab 3: Info
         self.setup_info_tab()
         
-        # Tab 4: 360° Viewer (Placeholder)
-        self.setup_placeholder_tab("360° Viewer", "360_viewer")
+        # Tab 4: 360° Viewer
+        self.setup_viewer_tab()
         
-        # Tab 5: YouTube Export (Placeholder)
-        self.setup_placeholder_tab("YouTube Export", "youtube_export")
+        # Tab 5: YouTube Export
+        self.setup_youtube_tab()
     
     def setup_quick_actions_tab(self):
         """Setup quick actions tab"""
@@ -376,6 +376,124 @@ class KM360GUI:
         self.info_text.insert(tk.END, "- Batch Operations\n")
         self.info_text.configure(state=tk.DISABLED)
     
+    def setup_viewer_tab(self):
+        """Setup 360° viewer tab"""
+        tab = ttk.Frame(self.notebook)
+        self.notebook.add(tab, text="👁️ 360° Viewer")
+        
+        ttk.Label(tab, text="360° Image & Video Viewer", font=("Arial", 16, "bold")).pack(pady=20)
+        
+        info_frame = ttk.LabelFrame(tab, text="About", padding=10)
+        info_frame.pack(fill=tk.X, padx=20, pady=10)
+        
+        ttk.Label(info_frame, text="View equirectangular 360° photos and videos with interactive controls.",
+                 wraplength=600).pack(anchor=tk.W)
+        
+        ttk.Label(info_frame, text="\nFeatures:", font=("Arial", 10, "bold")).pack(anchor=tk.W)
+        ttk.Label(info_frame, text="• Mouse drag to look around").pack(anchor=tk.W)
+        ttk.Label(info_frame, text="• Scroll to zoom").pack(anchor=tk.W)
+        ttk.Label(info_frame, text="• Arrow keys / WASD to navigate").pack(anchor=tk.W)
+        ttk.Label(info_frame, text="• Video playback with pause/play").pack(anchor=tk.W)
+        
+        btn_frame = ttk.Frame(tab)
+        btn_frame.pack(pady=30)
+        
+        ttk.Button(btn_frame, text="Launch 360° Viewer", 
+                  command=self.launch_viewer).pack(pady=10)
+        
+        ttk.Label(tab, text="Or run from terminal: python3 km360_viewer.py [file]",
+                 foreground="gray").pack(pady=10)
+    
+    def setup_youtube_tab(self):
+        """Setup YouTube export tab"""
+        tab = ttk.Frame(self.notebook)
+        self.notebook.add(tab, text="▶️ YouTube Export")
+        
+        ttk.Label(tab, text="YouTube 360° Export", font=("Arial", 16, "bold")).pack(pady=20)
+        
+        info_frame = ttk.LabelFrame(tab, text="About", padding=10)
+        info_frame.pack(fill=tk.X, padx=20, pady=10)
+        
+        ttk.Label(info_frame, text="Inject 360° spherical metadata into videos for proper YouTube playback.",
+                 wraplength=600).pack(anchor=tk.W)
+        
+        ttk.Label(info_frame, text="\nWhat this does:", font=("Arial", 10, "bold")).pack(anchor=tk.W)
+        ttk.Label(info_frame, text="• Adds Spatial Media metadata (no re-encoding)").pack(anchor=tk.W)
+        ttk.Label(info_frame, text="• YouTube recognizes the video as 360°").pack(anchor=tk.W)
+        ttk.Label(info_frame, text="• Preserves original video quality").pack(anchor=tk.W)
+        ttk.Label(info_frame, text="• Very fast (just metadata injection)").pack(anchor=tk.W)
+        
+        # File selection
+        file_frame = ttk.LabelFrame(tab, text="Export Video", padding=10)
+        file_frame.pack(fill=tk.X, padx=20, pady=10)
+        
+        self.yt_file_var = tk.StringVar()
+        ttk.Entry(file_frame, textvariable=self.yt_file_var, width=50).pack(side=tk.LEFT, padx=5)
+        ttk.Button(file_frame, text="Browse...", command=self.browse_yt_file).pack(side=tk.LEFT, padx=5)
+        
+        btn_frame = ttk.Frame(tab)
+        btn_frame.pack(pady=20)
+        
+        ttk.Button(btn_frame, text="Export for YouTube", 
+                  command=self.export_youtube).pack(pady=5)
+        
+        # Status
+        self.yt_status = ttk.Label(tab, text="", foreground="blue")
+        self.yt_status.pack(pady=10)
+        
+        ttk.Label(tab, text="Or run from terminal: python3 km360_youtube_export.py video.mp4",
+                 foreground="gray").pack(pady=10)
+    
+    def launch_viewer(self):
+        """Launch the 360° viewer"""
+        import subprocess
+        try:
+            subprocess.Popen(["python3", "km360_viewer.py"])
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not launch viewer: {e}")
+    
+    def browse_yt_file(self):
+        """Browse for video file to export"""
+        path = filedialog.askopenfilename(
+            title="Select Video to Export",
+            filetypes=[("Videos", "*.mp4 *.mov *.avi"), ("All Files", "*.*")]
+        )
+        if path:
+            self.yt_file_var.set(path)
+    
+    def export_youtube(self):
+        """Export video for YouTube"""
+        file_path = self.yt_file_var.get()
+        if not file_path:
+            messagebox.showwarning("No File", "Please select a video file.")
+            return
+        
+        if not os.path.exists(file_path):
+            messagebox.showerror("Error", "File not found.")
+            return
+        
+        self.yt_status.config(text="Exporting...", foreground="blue")
+        self.root.update()
+        
+        import subprocess
+        try:
+            result = subprocess.run(
+                ["python3", "km360_youtube_export.py", file_path],
+                capture_output=True, text=True, timeout=120
+            )
+            
+            if result.returncode == 0:
+                self.yt_status.config(text="✓ Export complete!", foreground="green")
+                messagebox.showinfo("Success", 
+                    "Video exported successfully!\n\n"
+                    "The video is ready to upload to YouTube.")
+            else:
+                self.yt_status.config(text="✗ Export failed", foreground="red")
+                messagebox.showerror("Error", result.stderr)
+        except Exception as e:
+            self.yt_status.config(text="✗ Export failed", foreground="red")
+            messagebox.showerror("Error", str(e))
+
     def setup_placeholder_tab(self, title, feature_key):
         """Setup a placeholder tab for future features"""
         tab = ttk.Frame(self.notebook)

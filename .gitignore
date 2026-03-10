@@ -47,3 +47,5 @@ temp/
 extracted_installer/
 wine_prefix/
 *.exe
+DSCN*.JPG
+DSCN*.MP4
