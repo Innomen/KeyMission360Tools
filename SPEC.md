@@ -537,7 +537,9 @@ Note: WiFi features not accessible via USB gphoto2 - requires separate implement
 
 ### 9.1 Hardware
 - No live view over USB
-- USB charging supported (may require "Charge By Computer" setting enabled)
+- USB charging supported when camera is on but idle (may require "Charge By Computer" setting)
+- USB charging likely NOT supported during active video recording (unverified)
+- HDMI output + charging behavior unknown (unverified)
 - Battery level readable via gphoto2 (`/main/status/batterylevel`)
 - Charging status NOT available via USB/PTP protocol (check camera LED - blinking = charging)
 - Battery life: ~1h 10min recording
