@@ -225,6 +225,17 @@ KeyMissionUtility.View
 
 ### 5.1 Completed Tools
 
+#### km360_gui.py (v1.5)
+- **Purpose**: Main GUI application
+- **Features**:
+  - File browser with right-click context menu
+  - Download manager
+  - Settings configuration
+  - 360° Viewer integration
+  - YouTube Export integration
+  - Quick Actions tab
+  - Camera info display
+
 #### km360_formatter.py
 - **Purpose**: Format SD card via raw PTP
 - **Method**: Direct USB/libusb1 communication
@@ -233,6 +244,7 @@ KeyMissionUtility.View
   - List storage devices
   - Format with confirmation
   - Force mode (no prompt)
+  - Headless test mode
 
 #### km360_info.py
 - **Purpose**: Display camera information
@@ -241,6 +253,7 @@ KeyMissionUtility.View
   - PTP endpoints
   - Device capabilities
   - Storage IDs
+  - Headless test mode
 
 #### km360_set_time.py
 - **Purpose**: Sync camera time to system time
@@ -249,6 +262,35 @@ KeyMissionUtility.View
   - Check current time
   - Sync to system time
   - Verify change
+  - Headless test mode
+
+#### km360_youtube_export.py (v1.5)
+- **Purpose**: Inject 360° metadata for YouTube
+- **Method**: ffmpeg or spatialmedia library
+- **Features**:
+  - No re-encoding (fast)
+  - Batch processing
+  - Auto fallback between methods
+  - Headless test mode
+- **Usage**: `python3 km360_youtube_export.py video.mp4`
+
+#### km360_viewer.py (v1.5)
+- **Purpose**: Interactive 360° photo/video viewer
+- **Method**: Equirectangular to rectilinear projection
+- **Features**:
+  - Mouse drag to look around
+  - Scroll to zoom
+  - WASD/Arrow key navigation
+  - Video playback (OpenCV)
+  - Headless test mode
+- **Controls**:
+  - Mouse drag: Look around
+  - Scroll: Zoom
+  - WASD/Arrows: Navigate
+  - Space: Play/Pause (video)
+  - F: Fullscreen
+  - R: Reset view
+- **Usage**: `python3 km360_viewer.py photo.jpg`
 
 #### manual_format.sh
 - **Purpose**: Format SD card without camera
@@ -290,7 +332,12 @@ MainWindow (tkinter)
    - Tree view of camera storage
    - File list with metadata (size, date, type)
    - Select multiple files
-   - Preview thumbnails (if available)
+   - **Right-click context menu** (v1.5)
+     * View in 360° Viewer
+     * Export for YouTube
+     * Download
+     * Delete
+     * Copy Filename
 
 3. **Download Manager**
    - Download selected files
@@ -312,35 +359,51 @@ MainWindow (tkinter)
    - Configure WiFi
    - Camera info display
 
-#### Planned Features (v2.0+)
-1. **360° Viewer** 🚧 PLACEHOLDER
+#### Implemented Features (v1.5)
+1. **360° Viewer** ✅ IMPLEMENTED
    - Equirectangular image viewer
-   - Pan/zoom with mouse
-   - Split-screen mode
-   - Export current view
+   - **Mouse drag** to look around (change yaw/pitch)
+   - **Scroll** to zoom (change FOV)
+   - **WASD/Arrow keys** to navigate
+   - Video playback with play/pause
+   - Rectilinear projection (natural perspective)
+   - Standalone tool: `km360_viewer.py`
 
-2. **YouTube Export** 🚧 PLACEHOLDER
-   - Re-encode video for YouTube
-   - Metadata injection for 360°
-   - Batch processing
-   - Quality presets
+2. **YouTube Export** ✅ IMPLEMENTED
+   - **No re-encoding** - fast metadata injection only
+   - Injects Spatial Media metadata for 360° recognition
+   - Batch processing support
+   - Methods: ffmpeg or spatialmedia library
+   - Standalone tool: `km360_youtube_export.py`
 
-3. **Video Player** 🚧 PLACEHOLDER
-   - MP4 playback
+#### File Browser ↔ Viewer Integration
+- Right-click any file → "View in 360° Viewer"
+  - Auto-downloads to temp location
+  - Opens in viewer automatically
+- Viewer tab has Quick Open dropdown
+  - Lists all camera files
+  - One-click open in viewer
+- YouTube Export from file browser
+  - Right-click video → "Export for YouTube"
+  - Downloads → Injects metadata → Saves
+
+#### Planned Features (v2.0+)
+1. **Enhanced Video Player**
    - Highlight tag navigation
    - Trim/split functionality
+   - Better timeline scrubbing
 
-4. **Batch Operations** 🚧 PLACEHOLDER
+2. **Batch Operations**
    - Batch rename
-   - Batch convert
+   - Batch convert formats
    - Batch delete
 
-5. **Advanced Settings** 🚧 PLACEHOLDER
-   - All 80+ gphoto2 properties
+3. **Advanced Settings**
+   - All 80+ gphoto2 properties in GUI
    - Settings profiles
    - Backup/restore settings
 
-6. **Tethered Shooting** 🚧 PLACEHOLDER
+4. **Tethered Shooting**
    - Remote capture
    - Intervalometer
    - Bulb mode control
@@ -350,15 +413,48 @@ MainWindow (tkinter)
 ## 6. Technical Implementation Details
 
 ### 6.1 Dependencies
+
+#### Core Dependencies
 ```
 Python 3.8+
 ├── gphoto2 (system package)
 ├── libgphoto2 (system package)
-├── python-gphoto2 (optional wrapper)
 ├── tkinter (built-in)
-├── Pillow (PIL) for images
-├── ffmpeg-python (for video ops)
 └── usb1 (for raw PTP)
+```
+
+#### GUI Application
+```
+├── tkinter (built-in)
+├── subprocess (built-in)
+├── threading (built-in)
+└── pathlib (built-in)
+```
+
+#### 360° Viewer
+```
+├── numpy (for projection math)
+├── Pillow (PIL) (image handling)
+└── opencv-python (optional, for video support)
+```
+
+#### YouTube Export
+```
+├── ffmpeg (system package)
+└── spatialmedia (optional, pip install spatialmedia)
+```
+
+#### Installation Commands
+```bash
+# Core
+sudo apt-get install gphoto2 libgphoto2-dev
+pip install libusb1
+
+# For 360° Viewer
+pip install numpy Pillow opencv-python
+
+# For YouTube Export (optional but recommended)
+pip install spatialmedia
 ```
 
 ### 6.2 Communication Methods
@@ -495,6 +591,32 @@ Note: WiFi features not accessible via USB gphoto2 - requires separate implement
 
 ---
 
-*Document Version: 1.0*
+## Changelog
+
+### v1.5 (2026-03-10)
+- **NEW**: 360° Image/Video Viewer (`km360_viewer.py`)
+  - Interactive equirectangular viewer
+  - Mouse/keyboard controls
+  - Video playback support
+- **NEW**: YouTube Export Tool (`km360_youtube_export.py`)
+  - Metadata injection (no re-encode)
+  - Batch processing
+- **GUI Updates**:
+  - Right-click context menus on file browser
+  - Viewer/Exporter integration
+  - Quick Open dropdown in Viewer tab
+- All tools now support `--headless` test mode
+
+### v1.0 (2026-03-10)
+- Initial release
+- km360_gui.py: Main GUI application
+- km360_formatter.py: SD card formatter
+- km360_set_time.py: Time synchronization
+- km360_info.py: Camera information
+- Complete gphoto2 property documentation
+
+---
+
+*Document Version: 1.5*
 *Date: 2026-03-10*
 *Authors: AI Assistant / Claude Code*
