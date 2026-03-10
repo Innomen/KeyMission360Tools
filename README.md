@@ -20,6 +20,7 @@ The Nikon KeyMission 360 has limited physical controls (only 2 buttons) and can 
 
 | File | Description |
 |------|-------------|
+| `km360_gui.py` | **🆕 MAIN GUI APPLICATION** - Complete camera management interface |
 | `km360_formatter.py` | Format SD card via raw PTP commands |
 | `km360_set_time.py` | **Sync camera time to system time** (fixes 2016 timestamp issue) |
 | `km360_info.py` | Display camera information and PTP endpoints |
@@ -64,7 +65,22 @@ sudo usermod -a -G plugdev $USER
 
 ## 📖 Usage
 
-### 1. Fix Date/Time (Most Important!)
+### 1. Launch the GUI (Recommended)
+
+The GUI provides an easy-to-use interface for all camera functions:
+
+```bash
+python3 km360_gui.py
+```
+
+Features:
+- 📁 **File Browser** - Browse and download photos/videos
+- ⚡ **Quick Actions** - Sync time, format SD, WiFi config
+- ⚙️ **Camera Settings** - White balance, movie mode, etc.
+- ℹ️ **Camera Info** - Battery, storage, firmware version
+- 🚧 **Coming Soon** - 360° viewer, YouTube export, video player
+
+### 2. Fix Date/Time (Most Important!)
 
 **The KeyMission 360 has NO RTC battery!** When the battery dies or is removed, the camera forgets the date/time and reverts to 2016. This causes all your photos to have wrong timestamps.
 

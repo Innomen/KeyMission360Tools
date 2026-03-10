@@ -44,3 +44,5 @@ Thumbs.db
 tmp/
 temp/
 *.tmp
+extracted_installer/
+wine_prefix/
