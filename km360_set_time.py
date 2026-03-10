@@ -88,6 +88,46 @@ def set_camera_time():
         return False
 
 
+def run_headless_test():
+    """Run basic tests without user interaction"""
+    print("=" * 60)
+    print("KeyMission 360 Time Sync - Headless Test Mode")
+    print("=" * 60)
+    print()
+    
+    # Test 1: Check gphoto2
+    print("[TEST 1] Checking gphoto2 installation...")
+    if check_gphoto2():
+        print("  ✓ gphoto2 is installed")
+    else:
+        print("  ✗ gphoto2 not found")
+        return
+    
+    # Test 2: Check for camera
+    print("\n[TEST 2] Checking for KeyMission 360...")
+    if detect_camera():
+        print("  ✓ KeyMission 360 detected")
+        
+        # Test 3: Try to get time
+        print("\n[TEST 3] Testing time read...")
+        camera_time = get_camera_time()
+        if camera_time:
+            print(f"  ✓ Camera time: {camera_time}")
+        else:
+            print("  ⚠ Could not read camera time")
+    else:
+        print("  ⚠ KeyMission 360 not connected (expected if camera off)")
+    
+    # Test 4: Test datetime format
+    print("\n[TEST 4] Testing datetime formatting...")
+    now = datetime.now().strftime("%a %d %b %Y %I:%M:%S %p")
+    print(f"  ✓ System time format: {now}")
+    
+    print("\n" + "=" * 60)
+    print("Headless test complete")
+    print("=" * 60)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Sync Nikon KeyMission 360 date/time to system time",
@@ -97,6 +137,7 @@ Examples:
   %(prog)s              # Sync time and show result
   %(prog)s --check      # Only check current camera time
   %(prog)s --quiet      # Set time with minimal output
+  %(prog)s --headless   # Run headless tests
 
 Note:
   The KeyMission 360 has no RTC battery and loses time when
@@ -115,12 +156,22 @@ Note:
         help="Minimal output (errors only)"
     )
     parser.add_argument(
+        "--headless", "--test", "-t",
+        action="store_true",
+        help="Run headless tests without changing time"
+    )
+    parser.add_argument(
         "--version", "-v",
         action="version",
         version="%(prog)s 1.0"
     )
     
     args = parser.parse_args()
+    
+    # Headless test mode
+    if args.headless:
+        run_headless_test()
+        sys.exit(0)
     
     if not args.quiet:
         print("=" * 60)

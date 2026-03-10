@@ -280,6 +280,57 @@ class KeyMission360Formatter:
             self.close()
 
 
+def run_headless_test():
+    """Run basic tests without user interaction"""
+    print("=" * 60)
+    print("KeyMission 360 Formatter - Headless Test Mode")
+    print("=" * 60)
+    print()
+    
+    # Test 1: Check imports
+    print("[TEST 1] Checking Python imports...")
+    try:
+        import usb1
+        import struct
+        print("  ✓ usb1 imported")
+        print("  ✓ struct imported")
+    except ImportError as e:
+        print(f"  ✗ Import error: {e}")
+        return
+    
+    # Test 2: Check USB context
+    print("\n[TEST 2] Checking USB context...")
+    try:
+        context = usb1.USBContext()
+        print("  ✓ USB context created")
+        
+        # Look for camera
+        found = False
+        for device in context.getDeviceIterator(skip_on_error=True):
+            if device.getVendorID() == VENDOR_ID and device.getProductID() == PRODUCT_ID:
+                print(f"  ✓ KeyMission 360 found at Bus {device.getBusNumber()}")
+                found = True
+                break
+        if not found:
+            print("  ⚠ KeyMission 360 not found (expected if camera off)")
+    except Exception as e:
+        print(f"  ✗ USB error: {e}")
+    
+    # Test 3: Test formatter initialization
+    print("\n[TEST 3] Testing formatter initialization...")
+    try:
+        formatter = KeyMission360Formatter()
+        print("  ✓ Formatter initialized")
+        print(f"  ✓ Vendor ID: 0x{VENDOR_ID:04X}")
+        print(f"  ✓ Product ID: 0x{PRODUCT_ID:04X}")
+    except Exception as e:
+        print(f"  ✗ Error: {e}")
+    
+    print("\n" + "=" * 60)
+    print("Headless test complete")
+    print("=" * 60)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Format Nikon KeyMission 360 memory card via USB/PTP",
@@ -290,6 +341,7 @@ Examples:
   %(prog)s --storage 0x00010001  # Format specific storage
   %(prog)s --force            # Skip confirmation prompt
   %(prog)s --list             # List storage devices only
+  %(prog)s --headless         # Run headless tests
 
 Warning:
   This tool will ERASE ALL DATA on the memory card!
@@ -303,9 +355,16 @@ Warning:
                        help="Skip confirmation prompt (DANGEROUS)")
     parser.add_argument("--list", "-l", action="store_true",
                        help="List storage devices without formatting")
+    parser.add_argument("--headless", "--test", "-t", action="store_true",
+                       help="Run headless tests without formatting")
     parser.add_argument("--version", "-v", action="version", version="%(prog)s 1.0")
     
     args = parser.parse_args()
+    
+    # Headless test mode
+    if args.headless:
+        run_headless_test()
+        sys.exit(0)
     
     print("=" * 60)
     print("Nikon KeyMission 360 Memory Card Formatter")

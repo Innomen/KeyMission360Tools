@@ -29,7 +29,75 @@ def get_string_descriptor(device, index):
         return "N/A"
 
 
+def run_headless_test():
+    """Run basic tests without user interaction"""
+    print("=" * 60)
+    print("KeyMission 360 Info - Headless Test Mode")
+    print("=" * 60)
+    print()
+    
+    # Test 1: Check imports
+    print("[TEST 1] Checking Python imports...")
+    try:
+        import usb1
+        import struct
+        print("  ✓ usb1 imported")
+        print("  ✓ struct imported")
+    except ImportError as e:
+        print(f"  ✗ Import error: {e}")
+        return
+    
+    # Test 2: Check USB context
+    print("\n[TEST 2] Checking USB context...")
+    try:
+        context = usb1.USBContext()
+        print("  ✓ USB context created")
+        
+        # Look for camera
+        found = False
+        for device in context.getDeviceIterator(skip_on_error=True):
+            if device.getVendorID() == VENDOR_ID and device.getProductID() == PRODUCT_ID:
+                print(f"  ✓ KeyMission 360 found")
+                print(f"    Vendor ID: 0x{device.getVendorID():04X}")
+                print(f"    Product ID: 0x{device.getProductID():04X}")
+                print(f"    Bus: {device.getBusNumber()}")
+                found = True
+                break
+        if not found:
+            print("  ⚠ KeyMission 360 not found (expected if camera off)")
+    except Exception as e:
+        print(f"  ✗ USB error: {e}")
+    
+    # Test 3: Check constants
+    print("\n[TEST 3] Checking PTP constants...")
+    print(f"  ✓ VENDOR_ID: 0x{VENDOR_ID:04X}")
+    print(f"  ✓ PRODUCT_ID: 0x{PRODUCT_ID:04X}")
+    print(f"  ✓ PTP_OC_GET_DEVICE_INFO: 0x{0x1001:04X}")
+    print(f"  ✓ PTP_OC_OPEN_SESSION: 0x{0x1002:04X}")
+    
+    print("\n" + "=" * 60)
+    print("Headless test complete")
+    print("=" * 60)
+
+
 def main():
+    import argparse
+    
+    parser = argparse.ArgumentParser(
+        description="Display Nikon KeyMission 360 camera information"
+    )
+    parser.add_argument(
+        "--headless", "--test", "-t",
+        action="store_true",
+        help="Run headless tests only"
+    )
+    args = parser.parse_args()
+    
+    # Headless test mode
+    if args.headless:
+        run_headless_test()
+        sys.exit(0)
+    
     print("=" * 60)
     print("Nikon KeyMission 360 Camera Information")
     print("=" * 60)

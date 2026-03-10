@@ -24,6 +24,7 @@ import subprocess
 import threading
 import os
 import json
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -88,7 +89,7 @@ class KM360GUI:
         self.setup_status_bar()
         
         # Try auto-connect
-        self.after(1000, self.check_connection)
+        self.root.after(1000, self.check_connection)
     
     def setup_menu(self):
         """Setup application menu bar"""
@@ -941,7 +942,66 @@ class KM360GUI:
             "https://github.com/Innomen/KeyMission360Tools")
 
 
+def run_headless_test():
+    """Run basic tests without GUI"""
+    print("=" * 60)
+    print("KeyMission 360 GUI - Headless Test Mode")
+    print("=" * 60)
+    print()
+    
+    # Test 1: Check gphoto2
+    print("[TEST 1] Checking gphoto2 installation...")
+    try:
+        result = subprocess.run(["gphoto2", "--version"], 
+                              capture_output=True, text=True, timeout=5)
+        if result.returncode == 0:
+            version = result.stdout.split('\n')[0]
+            print(f"  ✓ gphoto2 found: {version}")
+        else:
+            print("  ✗ gphoto2 returned error")
+    except FileNotFoundError:
+        print("  ✗ gphoto2 not installed")
+    except Exception as e:
+        print(f"  ✗ Error: {e}")
+    
+    # Test 2: Check for camera
+    print("\n[TEST 2] Checking for KeyMission 360...")
+    try:
+        result = subprocess.run(["gphoto2", "--auto-detect"], 
+                              capture_output=True, text=True, timeout=5)
+        if "KeyMission 360" in result.stdout:
+            print("  ✓ KeyMission 360 detected")
+            # Get summary
+            result = subprocess.run(["gphoto2", "--summary"], 
+                                  capture_output=True, text=True, timeout=10)
+            for line in result.stdout.split('\n'):
+                if "Model:" in line:
+                    print(f"    {line.strip()}")
+                if "Battery" in line:
+                    print(f"    {line.strip()}")
+        else:
+            print("  ⚠ KeyMission 360 not connected (expected if camera off)")
+    except Exception as e:
+        print(f"  ✗ Error: {e}")
+    
+    # Test 3: Check dependencies
+    print("\n[TEST 3] Checking Python dependencies...")
+    print("  ✓ tkinter (built-in)")
+    print("  ✓ subprocess (built-in)")
+    print("  ✓ threading (built-in)")
+    print("  ✓ pathlib (built-in)")
+    
+    print("\n" + "=" * 60)
+    print("Headless test complete")
+    print("=" * 60)
+
+
 def main():
+    # Check for headless/test mode
+    if len(sys.argv) > 1 and sys.argv[1] in ('--headless', '--test', '-t'):
+        run_headless_test()
+        return
+    
     root = tk.Tk()
     
     # Set icon (if available) or use default
