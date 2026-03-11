@@ -597,6 +597,27 @@ Note: WiFi features not accessible via USB gphoto2 - requires separate implement
 
 ---
 
+## 12. Community
+
+### 12.1 KeyMission 360 Resources
+- [360rumors.com](https://360rumors.com/nikon-keymission-360-preliminary-review/) - Reviews and comparisons
+- [Nikon Support](https://www.nikonusa.com/p/keymission-360/26513/overview) - Official specs (archive)
+
+### 12.2 Places to Share This Project
+- [r/360Cameras](https://reddit.com/r/360Cameras) - 360° camera community
+- [r/Nikon](https://reddit.com/r/Nikon) - Nikon users
+- [r/ActionCameras](https://reddit.com/r/ActionCameras) - Action cam enthusiasts
+- [r/DataHoarder](https://reddit.com/r/DataHoarder) - For recovery/restoration projects
+
+### 12.3 Target Audience
+This project is especially valuable for:
+- Users who can no longer install the official SnapBridge app (discontinued)
+- Linux users who never had official support
+- Users wanting batch operations or automation
+- Technical users wanting low-level camera control
+
+---
+
 ## Changelog
 
 ### v1.5 (2026-03-10)

@@ -26,8 +26,21 @@ import threading
 import os
 import json
 import sys
+import time
+import shutil
+import hashlib
+import tempfile
 from datetime import datetime
 from pathlib import Path
+
+# USB imports for port cycling
+try:
+    import usb1
+    import usb.core
+    import usb.util
+    USB_AVAILABLE = True
+except ImportError:
+    USB_AVAILABLE = False
 
 # Version info
 VERSION = "1.0"
@@ -40,6 +53,18 @@ PLACEHOLDER_FEATURES = {
     "tethered": "Tethered Shooting - Coming in v2.0",
     "gps": "GPS Data Editor - Coming in v2.0",
 }
+
+
+def format_size_bytes(size):
+    """Format bytes to human readable string"""
+    if size is None:
+        return "Unknown"
+    
+    for unit in ['B', 'KB', 'MB', 'GB']:
+        if size < 1024:
+            return f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} TB"
 
 
 class PlaceholderDialog:
@@ -68,6 +93,582 @@ class PlaceholderDialog:
         ttk.Button(self.window, text="OK", command=self.window.destroy).pack(pady=10)
 
 
+class DownloadProgressDialog:
+    """Download manager dialog with progress bar, resume support, checksum verification, and queue"""
+    
+    def __init__(self, parent, files, dest, main_app, youtube_mode=False, youtube_output_paths=None):
+        self.parent = parent
+        self.files = files  # List of (num, name) tuples
+        self.dest = dest
+        self.main_app = main_app
+        self.youtube_mode = youtube_mode  # If True, process for YouTube export
+        self.youtube_output_paths = youtube_output_paths  # Output paths for YouTube mode
+        self.downloading = False
+        self.cancelled = False
+        self.current_index = 0
+        self.failed_files = []
+        self.completed_files = []
+        self.file_checksums = {}  # Store checksums for verification
+        
+        # Create dialog
+        self.window = tk.Toplevel(parent)
+        title = "📥 YouTube Export" if youtube_mode else "📥 Download Manager"
+        self.window.title(title)
+        self.window.geometry("650x550")
+        self.window.transient(parent)
+        self.window.grab_set()
+        
+        # Center dialog
+        self.window.update_idletasks()
+        x = (self.window.winfo_screenwidth() // 2) - 325
+        y = (self.window.winfo_screenheight() // 2) - 275
+        self.window.geometry(f"+{x}+{y}")
+        
+        self.setup_ui()
+        
+        # Start download automatically
+        self.window.after(100, self.start_download)
+    
+    def setup_ui(self):
+        """Setup the download dialog UI"""
+        # Title
+        title = "📥 YouTube Export" if self.youtube_mode else "📥 Download Manager"
+        ttk.Label(self.window, text=title, 
+                 font=("Arial", 14, "bold")).pack(pady=10)
+        
+        # Overall progress
+        progress_frame = ttk.LabelFrame(self.window, text="Overall Progress", padding=10)
+        progress_frame.pack(fill=tk.X, padx=10, pady=5)
+        
+        self.overall_var = tk.DoubleVar(value=0)
+        self.overall_bar = ttk.Progressbar(progress_frame, variable=self.overall_var, 
+                                          maximum=len(self.files), length=600)
+        self.overall_bar.pack(fill=tk.X)
+        
+        self.overall_label = ttk.Label(progress_frame, 
+                                      text=f"0 / {len(self.files)} files")
+        self.overall_label.pack(pady=(5, 0))
+        
+        # Current file progress
+        current_frame = ttk.LabelFrame(self.window, text="Current File", padding=10)
+        current_frame.pack(fill=tk.X, padx=10, pady=5)
+        
+        self.current_name_var = tk.StringVar(value="Waiting...")
+        ttk.Label(current_frame, textvariable=self.current_name_var, 
+                 font=("Arial", 10, "bold")).pack(anchor=tk.W)
+        
+        self.current_progress_var = tk.DoubleVar(value=0)
+        self.current_bar = ttk.Progressbar(current_frame, variable=self.current_progress_var, 
+                                          maximum=100, length=600)
+        self.current_bar.pack(fill=tk.X, pady=(5, 0))
+        
+        self.current_size_var = tk.StringVar(value="")
+        ttk.Label(current_frame, textvariable=self.current_size_var).pack(anchor=tk.W)
+        
+        # Speed and ETA
+        stats_frame = ttk.Frame(current_frame)
+        stats_frame.pack(fill=tk.X, pady=(5, 0))
+        
+        self.speed_var = tk.StringVar(value="Speed: -")
+        ttk.Label(stats_frame, textvariable=self.speed_var).pack(side=tk.LEFT)
+        
+        self.eta_var = tk.StringVar(value="ETA: -")
+        ttk.Label(stats_frame, textvariable=self.eta_var).pack(side=tk.RIGHT)
+        
+        # Verification status
+        self.verify_var = tk.StringVar(value="")
+        self.verify_label = ttk.Label(current_frame, textvariable=self.verify_var, 
+                                     foreground="green")
+        self.verify_label.pack(anchor=tk.W)
+        
+        # File queue list
+        queue_frame = ttk.LabelFrame(self.window, text="Queue", padding=5)
+        queue_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        
+        # Treeview for queue
+        columns = ("status", "name", "size", "verify")
+        self.queue_tree = ttk.Treeview(queue_frame, columns=columns, 
+                                       show="headings", height=8)
+        
+        self.queue_tree.heading("status", text="Status")
+        self.queue_tree.heading("name", text="Filename")
+        self.queue_tree.heading("size", text="Size")
+        self.queue_tree.heading("verify", text="Verify")
+        
+        self.queue_tree.column("status", width=100)
+        self.queue_tree.column("name", width=250)
+        self.queue_tree.column("size", width=80)
+        self.queue_tree.column("verify", width=80)
+        
+        vsb = ttk.Scrollbar(queue_frame, orient="vertical", command=self.queue_tree.yview)
+        self.queue_tree.configure(yscrollcommand=vsb.set)
+        
+        self.queue_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Populate queue
+        for num, name in self.files:
+            self.queue_tree.insert('', 'end', values=("⏳ Pending", name, "-", "-"), tags=('pending',))
+        
+        self.queue_tree.tag_configure('pending', foreground='gray')
+        self.queue_tree.tag_configure('downloading', foreground='blue')
+        self.queue_tree.tag_configure('completed', foreground='green')
+        self.queue_tree.tag_configure('failed', foreground='red')
+        self.queue_tree.tag_configure('resumed', foreground='orange')
+        self.queue_tree.tag_configure('verifying', foreground='purple')
+        
+        # Buttons
+        btn_frame = ttk.Frame(self.window)
+        btn_frame.pack(fill=tk.X, padx=10, pady=10)
+        
+        self.cancel_btn = ttk.Button(btn_frame, text="Cancel", command=self.cancel_download)
+        self.cancel_btn.pack(side=tk.LEFT, padx=(0, 5))
+        
+        self.retry_btn = ttk.Button(btn_frame, text="Retry Failed", 
+                                   command=self.retry_failed, state=tk.DISABLED)
+        self.retry_btn.pack(side=tk.LEFT, padx=(0, 5))
+        
+        ttk.Button(btn_frame, text="Close", command=self.window.destroy).pack(side=tk.RIGHT)
+        
+        # Status bar
+        self.status_var = tk.StringVar(value="Ready to download")
+        ttk.Label(self.window, textvariable=self.status_var, 
+                 relief=tk.SUNKEN, anchor=tk.W).pack(side=tk.BOTTOM, fill=tk.X)
+    
+    def start_download(self):
+        """Start the download thread"""
+        if self.downloading:
+            return
+        
+        self.downloading = True
+        self.cancelled = False
+        self.thread = threading.Thread(target=self._download_worker)
+        self.thread.daemon = True
+        self.thread.start()
+    
+    def cancel_download(self):
+        """Cancel the download"""
+        self.cancelled = True
+        self.status_var.set("Cancelling...")
+        self.cancel_btn.config(state=tk.DISABLED)
+    
+    def retry_failed(self):
+        """Retry failed downloads"""
+        if self.failed_files:
+            self.files = self.failed_files[:]
+            self.failed_files = []
+            self.current_index = 0
+            self.completed_files = []
+            
+            # Clear queue
+            for item in self.queue_tree.get_children():
+                self.queue_tree.delete(item)
+            
+            # Repopulate
+            for num, name in self.files:
+                self.queue_tree.insert('', 'end', values=("⏳ Pending", name, "-", "-"), tags=('pending',))
+            
+            self.overall_var.set(0)
+            self.overall_label.config(text=f"0 / {len(self.files)} files")
+            self.retry_btn.config(state=tk.DISABLED)
+            
+            self.start_download()
+    
+    def _get_file_size_on_camera(self, file_num):
+        """Get the size of a file on the camera using gphoto2 --list-files"""
+        try:
+            result = subprocess.run(
+                ["gphoto2", "--list-files"],
+                capture_output=True, text=True, timeout=30
+            )
+            
+            for line in result.stdout.split('\n'):
+                if line.strip().startswith(f'#{file_num}'):
+                    parts = line.strip().split()
+                    if len(parts) >= 3:
+                        size_str = parts[2]
+                        return self._parse_size(size_str)
+        except Exception as e:
+            print(f"Error getting file size: {e}")
+        
+        return None
+    
+    def _parse_size(self, size_str):
+        """Parse size string like '12MB' to bytes"""
+        size_str = size_str.upper()
+        multipliers = {'B': 1, 'KB': 1024, 'MB': 1024**2, 'GB': 1024**3}
+        
+        for suffix, mult in multipliers.items():
+            if size_str.endswith(suffix):
+                try:
+                    return int(float(size_str[:-len(suffix)]) * mult)
+                except:
+                    return None
+        
+        try:
+            return int(size_str)
+        except:
+            return None
+    
+    def _format_size(self, size):
+        """Format bytes to human readable"""
+        return format_size_bytes(size)
+    
+    def _calculate_checksum(self, filepath):
+        """Calculate SHA256 checksum of a file"""
+        import hashlib
+        sha256_hash = hashlib.sha256()
+        try:
+            with open(filepath, "rb") as f:
+                for byte_block in iter(lambda: f.read(4096), b""):
+                    sha256_hash.update(byte_block)
+            return sha256_hash.hexdigest()
+        except Exception as e:
+            print(f"Error calculating checksum: {e}")
+            return None
+    
+    def _verify_file_integrity(self, filepath, expected_size=None):
+        """Verify file exists and has correct size, return checksum"""
+        if not os.path.exists(filepath):
+            return False, None, "File not found"
+        
+        actual_size = os.path.getsize(filepath)
+        
+        if expected_size and actual_size != expected_size:
+            return False, None, f"Size mismatch: {actual_size} vs {expected_size}"
+        
+        # Calculate checksum
+        checksum = self._calculate_checksum(filepath)
+        if checksum:
+            return True, checksum, "OK"
+        else:
+            return False, None, "Checksum failed"
+    
+    def _download_with_rsync_style_resume(self, file_num, file_name, dest_path, camera_size):
+        """Download file with rsync-style resume support"""
+        import tempfile
+        
+        # Use a temp file during download
+        temp_dir = tempfile.gettempdir()
+        temp_path = os.path.join(temp_dir, f"km360_dl_{file_name}.partial")
+        
+        # Check for existing partial download
+        resume_offset = 0
+        if os.path.exists(temp_path):
+            resume_offset = os.path.getsize(temp_path)
+            if camera_size and resume_offset >= camera_size:
+                # Already complete, just move it
+                os.rename(temp_path, dest_path)
+                return True, "Complete (already downloaded)"
+            self.window.after(0, lambda: self.status_var.set(f"Resuming from {format_size_bytes(resume_offset)}..."))
+        
+        # Try using gphoto2 with skip-existing or force-overwrite
+        # Unfortunately gphoto2 doesn't support byte-range resume, so we use a different approach:
+        # 1. Download to temp location
+        # 2. If download fails and partial file exists, retry up to 3 times
+        # 3. Verify checksum after download
+        
+        max_retries = 3
+        last_error = None
+        
+        for attempt in range(max_retries):
+            if self.cancelled:
+                return False, "Cancelled"
+            
+            try:
+                # Remove partial file if it exists and this is a retry
+                if attempt > 0 and os.path.exists(temp_path):
+                    try:
+                        os.remove(temp_path)
+                        resume_offset = 0
+                    except:
+                        pass
+                
+                # Download the file
+                result = subprocess.run(
+                    ["gphoto2", "--get-file", str(file_num), 
+                     f"--filename={temp_path}"],
+                    capture_output=True, timeout=300
+                )
+                
+                if result.returncode == 0:
+                    # Download successful, move to final destination
+                    if os.path.exists(temp_path):
+                        # Verify size
+                        downloaded_size = os.path.getsize(temp_path)
+                        if camera_size and downloaded_size != camera_size:
+                            last_error = f"Size mismatch: {downloaded_size} vs {camera_size}"
+                            continue  # Retry
+                        
+                        # Move to final destination
+                        shutil.move(temp_path, dest_path)
+                        return True, "Downloaded successfully"
+                    else:
+                        last_error = "Temp file not found after download"
+                        continue
+                else:
+                    stderr = result.stderr.decode() if result.stderr else "Unknown error"
+                    last_error = f"gphoto2 error: {stderr}"
+                    
+                    # Check if it's a timeout or connection error
+                    if "timeout" in stderr.lower() or "io" in stderr.lower():
+                        time.sleep(2)  # Brief pause before retry
+                        continue
+                    else:
+                        return False, last_error
+                        
+            except subprocess.TimeoutExpired:
+                last_error = "Download timeout"
+                continue
+            except Exception as e:
+                last_error = f"Exception: {str(e)}"
+                continue
+        
+        # All retries failed
+        # Clean up partial file
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except:
+                pass
+        
+        return False, f"Failed after {max_retries} attempts: {last_error}"
+    
+    def _download_worker(self):
+        """Main download worker thread"""
+        import tempfile
+        import shutil
+        
+        total_files = len(self.files)
+        start_time = time.time()
+        
+        for i, (file_num, file_name) in enumerate(self.files):
+            if self.cancelled:
+                break
+            
+            self.current_index = i
+            
+            # Determine paths based on mode
+            if self.youtube_mode and self.youtube_output_paths:
+                temp_dir = tempfile.gettempdir()
+                dest_path = os.path.join(temp_dir, file_name)
+                final_output = self.youtube_output_paths[i]
+            else:
+                dest_path = os.path.join(self.dest, file_name)
+                final_output = None
+            
+            # Update UI
+            self.window.after(0, lambda n=file_name, idx=i: self._update_current_file(n, idx))
+            
+            # Get expected file size from camera
+            camera_size = self._get_file_size_on_camera(file_num)
+            if camera_size:
+                self.window.after(0, lambda s=format_size_bytes(camera_size): 
+                    self.current_size_var.set(f"Expected size: {s}"))
+            
+            # Check for existing complete file (resume support)
+            if os.path.exists(dest_path):
+                existing_size = os.path.getsize(dest_path)
+                if camera_size and existing_size == camera_size:
+                    # Verify checksum of existing file
+                    self.window.after(0, lambda: self.status_var.set("Verifying existing file..."))
+                    valid, checksum, msg = self._verify_file_integrity(dest_path, camera_size)
+                    if valid:
+                        self.file_checksums[file_name] = checksum
+                        self.window.after(0, lambda idx=i, cs=checksum[:16]: 
+                            self._mark_verified(idx, cs))
+                        self.completed_files.append((file_num, file_name))
+                        continue
+                    else:
+                        # File exists but is corrupt, remove and re-download
+                        try:
+                            os.remove(dest_path)
+                        except:
+                            pass
+            
+            # Download the file with retry/resume support
+            self.window.after(0, lambda: self.status_var.set("Downloading..."))
+            success, message = self._download_with_rsync_style_resume(
+                file_num, file_name, dest_path, camera_size
+            )
+            
+            if success:
+                # Verify the downloaded file
+                self.window.after(0, lambda: self.status_var.set("Verifying checksum..."))
+                self.window.after(0, lambda idx=i: self._mark_verifying(idx))
+                
+                valid, checksum, msg = self._verify_file_integrity(dest_path, camera_size)
+                
+                if valid:
+                    self.file_checksums[file_name] = checksum
+                    
+                    # If YouTube mode, process the video
+                    if self.youtube_mode and final_output:
+                        self.window.after(0, lambda: self.status_var.set("Injecting 360° metadata..."))
+                        yt_success, yt_message = self._process_youtube_video(dest_path, final_output)
+                        
+                        if yt_success:
+                            self.completed_files.append((file_num, file_name))
+                            self.window.after(0, lambda idx=i, cs=checksum[:16]: 
+                                self._mark_completed(idx, f"Exported", cs))
+                        else:
+                            self.failed_files.append((file_num, file_name, yt_message))
+                            self.window.after(0, lambda idx=i, err=yt_message: 
+                                self._mark_failed(idx, err))
+                    else:
+                        self.completed_files.append((file_num, file_name))
+                        self.window.after(0, lambda idx=i, cs=checksum[:16]: 
+                            self._mark_completed(idx, "Completed", cs))
+                else:
+                    self.failed_files.append((file_num, file_name, f"Verify failed: {msg}"))
+                    self.window.after(0, lambda idx=i: self._mark_failed(idx, "Checksum failed"))
+            else:
+                self.failed_files.append((file_num, file_name, message))
+                self.window.after(0, lambda idx=i, err=message[:30]: 
+                    self._mark_failed(idx, err))
+            
+            # Update overall progress
+            elapsed = time.time() - start_time
+            avg_time = elapsed / (i + 1) if i > 0 else 0
+            remaining_files = total_files - (i + 1)
+            eta_seconds = avg_time * remaining_files
+            
+            self.window.after(0, lambda p=i+1, eta=eta_seconds: 
+                self._update_overall_progress(p, total_files, eta))
+        
+        # Done
+        self.downloading = False
+        self.window.after(0, self._download_complete)
+    
+    def _process_youtube_video(self, temp_path, output_path):
+        """Process video for YouTube with 360° metadata"""
+        try:
+            result = subprocess.run(
+                ["python3", "km360_youtube_export.py", temp_path, output_path],
+                capture_output=True, text=True, timeout=60
+            )
+            
+            # Clean up temp file
+            try:
+                os.remove(temp_path)
+            except:
+                pass
+            
+            if result.returncode == 0:
+                return True, "OK"
+            else:
+                return False, result.stderr if result.stderr else "Export failed"
+                
+        except Exception as e:
+            # Clean up temp file on error
+            try:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+            except:
+                pass
+            return False, str(e)
+    
+    def _update_current_file(self, name, index):
+        """Update UI for current file"""
+        self.current_name_var.set(f"{index + 1}. {name}")
+        self.current_progress_var.set(0)
+        self.current_size_var.set("")
+        self.speed_var.set("Speed: -")
+        self.eta_var.set("ETA: -")
+        self.verify_var.set("")
+        
+        # Highlight in queue
+        item = self.queue_tree.get_children()[index]
+        self.queue_tree.item(item, values=("⬇️ Downloading", name, "-", "-"), tags=('downloading',))
+        self.queue_tree.see(item)
+    
+    def _mark_completed(self, index, status="Completed", checksum=""):
+        """Mark file as completed in queue"""
+        item = self.queue_tree.get_children()[index]
+        values = self.queue_tree.item(item, 'values')
+        self.queue_tree.item(item, 
+            values=(f"✓ {status}", values[1], values[2], checksum + "..." if checksum else "OK"), 
+            tags=('completed',))
+    
+    def _mark_failed(self, index, error="Failed"):
+        """Mark file as failed in queue"""
+        item = self.queue_tree.get_children()[index]
+        values = self.queue_tree.item(item, 'values')
+        error_short = error[:20] + "..." if len(error) > 20 else error
+        self.queue_tree.item(item, 
+            values=(f"✗ {error_short}", values[1], values[2], "Fail"), 
+            tags=('failed',))
+    
+    def _mark_verifying(self, index):
+        """Mark file as being verified"""
+        item = self.queue_tree.get_children()[index]
+        values = self.queue_tree.item(item, 'values')
+        self.queue_tree.item(item, 
+            values=("🔍 Verifying", values[1], values[2], "-"), 
+            tags=('verifying',))
+    
+    def _mark_verified(self, index, checksum=""):
+        """Mark file as verified (already existed)"""
+        item = self.queue_tree.get_children()[index]
+        values = self.queue_tree.item(item, 'values')
+        self.queue_tree.item(item, 
+            values=("✓ Verified", values[1], "Exists", checksum + "..." if checksum else "OK"), 
+            tags=('completed',))
+    
+    def _update_overall_progress(self, completed, total, eta_seconds):
+        """Update overall progress bar"""
+        self.overall_var.set(completed)
+        self.overall_label.config(text=f"{completed} / {total} files")
+        
+        if eta_seconds > 0:
+            if eta_seconds < 60:
+                eta_str = f"{int(eta_seconds)}s"
+            elif eta_seconds < 3600:
+                eta_str = f"{int(eta_seconds/60)}m {int(eta_seconds%60)}s"
+            else:
+                eta_str = f"{int(eta_seconds/3600)}h {int((eta_seconds%3600)/60)}m"
+            self.eta_var.set(f"ETA: {eta_str}")
+        
+        mode_str = "Exported" if self.youtube_mode else "Downloaded"
+        self.status_var.set(f"{mode_str} {completed} of {total} files")
+    
+    def _download_complete(self):
+        """Called when download is complete"""
+        self.cancel_btn.config(state=tk.DISABLED)
+        
+        mode_str = "Export" if self.youtube_mode else "Download"
+        
+        if self.failed_files:
+            self.retry_btn.config(state=tk.NORMAL)
+            self.status_var.set(f"Completed with {len(self.failed_files)} failures")
+            
+            # Build detailed error message
+            error_details = "\n".join([f"• {name}: {err[:50]}" for _, name, err in self.failed_files[:5]])
+            if len(self.failed_files) > 5:
+                error_details += f"\n... and {len(self.failed_files) - 5} more"
+            
+            messagebox.showwarning(f"{mode_str} Complete", 
+                f"{mode_str}ed {len(self.completed_files)} files.\n"
+                f"Failed: {len(self.failed_files)} files.\n\n"
+                f"Details:\n{error_details}\n\n"
+                "Click 'Retry Failed' to attempt again.")
+        elif self.cancelled:
+            self.status_var.set(f"{mode_str} cancelled")
+            messagebox.showinfo(f"{mode_str} Cancelled", 
+                f"{mode_str}ed {len(self.completed_files)} files before cancellation.")
+        else:
+            self.status_var.set(f"All {mode_str.lower()}s complete!")
+            self.overall_var.set(len(self.files))
+            self.current_progress_var.set(100)
+            messagebox.showinfo(f"{mode_str} Complete", 
+                f"Successfully {mode_str}ed {len(self.completed_files)} files!")
+        
+        # Refresh main app file list
+        if not self.youtube_mode:
+            self.main_app.set_status(f"Downloaded {len(self.completed_files)} files")
+            self.main_app.refresh_files()
+
+
 class KM360GUI:
     def __init__(self, root):
         self.root = root
@@ -86,8 +687,8 @@ class KM360GUI:
         self.setup_main_layout()
         self.setup_status_bar()
         
-        # Try auto-connect
-        self.root.after(1000, self.check_connection)
+        # Try auto-connect (with delay to let camera stabilize)
+        self.root.after(2000, self.check_connection)
     
     def setup_menu(self):
         """Setup application menu bar"""
@@ -220,10 +821,46 @@ class KM360GUI:
         ttk.Button(btn_frame, text="Download All", 
                   command=self.download_all).pack(side=tk.LEFT, padx=(0, 5))
         ttk.Button(btn_frame, text="Delete", 
-                  command=self.delete_selected).pack(side=tk.LEFT)
+                  command=self.delete_selected).pack(side=tk.LEFT, padx=(0, 5))
+        
+        # USB Reset button
+        self.reset_usb_btn = ttk.Button(btn_frame, text="🔄 Reset USB", 
+                                       command=self.reset_usb_port)
+        self.reset_usb_btn.pack(side=tk.RIGHT)
         
         # Setup right-click context menu
         self.setup_file_context_menu()
+        
+        # Setup keyboard shortcuts for batch selection
+        self.setup_file_shortcuts()
+    
+    def setup_file_shortcuts(self):
+        """Setup keyboard shortcuts for file browser"""
+        # Ctrl+A - Select all
+        self.file_tree.bind("<Control-a>", self.select_all_files)
+        self.file_tree.bind("<Control-A>", self.select_all_files)
+        
+        # Space - Toggle selection of current item (custom multi-select)
+        self.file_tree.bind("<space>", self.toggle_selection)
+        
+        # Shift+Click for range selection is built into Treeview with extended mode
+    
+    def select_all_files(self, event=None):
+        """Select all files in the tree"""
+        items = self.file_tree.get_children()
+        if items:
+            self.file_tree.selection_set(items)
+        return "break"
+    
+    def toggle_selection(self, event=None):
+        """Toggle selection of focused item"""
+        focused = self.file_tree.focus()
+        if focused:
+            if focused in self.file_tree.selection():
+                self.file_tree.selection_remove(focused)
+            else:
+                self.file_tree.selection_add(focused)
+        return "break"
     
     def setup_file_context_menu(self):
         """Setup right-click context menu for file browser"""
@@ -286,118 +923,249 @@ class KM360GUI:
         return idx, name
     
     def view_selected_in_viewer(self):
-        """Download and view selected file in 360° viewer"""
-        idx, name = self.get_selected_file_info()
-        if not idx:
+        """Download and view selected file(s) in 360° viewer - ignores non-viewable files"""
+        selected = self.file_tree.selection()
+        if not selected:
+            messagebox.showinfo("No Selection", "Please select a file to view.")
             return
         
-        # Check if it's an image or video
-        ext = name.lower().split('.')[-1] if '.' in name else ''
-        if ext not in ['jpg', 'jpeg', 'png', 'mp4', 'mov', 'avi']:
-            messagebox.showinfo("Not Supported", 
-                "360° Viewer only supports images and videos.\n\n"
-                f"File: {name}")
-            return
+        # Find first viewable file in selection (ignore others silently)
+        for item in selected:
+            idx = self.file_tree.index(item) + 1
+            values = self.file_tree.item(item, 'values')
+            name = values[0] if values else f"file_{idx}"
+            
+            # Check if it's viewable (image or video)
+            ext = name.lower().split('.')[-1] if '.' in name else ''
+            if ext in ['jpg', 'jpeg', 'png', 'mp4', 'mov', 'avi']:
+                # Found a viewable file, open it
+                self._view_single_file(idx, name)
+                return
         
-        # Download to temp location
-        import tempfile
-        temp_dir = tempfile.gettempdir()
-        temp_path = os.path.join(temp_dir, name)
-        
-        self.set_status(f"Downloading {name} for viewing...")
-        
-        def download_and_view():
-            try:
-                # Download file
-                result = subprocess.run(
-                    ["gphoto2", "--get-file", str(idx), f"--filename={temp_path}"],
-                    capture_output=True, timeout=60
-                )
-                
-                if result.returncode == 0 and os.path.exists(temp_path):
-                    self.set_status(f"Opening {name} in viewer...")
-                    # Launch viewer with file
-                    subprocess.Popen(["python3", "km360_viewer.py", temp_path])
-                else:
-                    self.set_status("Failed to download file")
-                    messagebox.showerror("Error", "Failed to download file from camera.")
-            except Exception as e:
-                self.set_status(f"Error: {str(e)}")
-        
-        threading.Thread(target=download_and_view).start()
+        # No viewable files found
+        messagebox.showinfo("Not Supported", 
+            "360° Viewer only supports images and videos.\n\n"
+            "No viewable files found in selection.")
     
-    def export_selected_for_youtube(self):
-        """Download and export selected video for YouTube"""
-        idx, name = self.get_selected_file_info()
-        if not idx:
-            return
-        
-        # Check if it's a video
-        ext = name.lower().split('.')[-1] if '.' in name else ''
-        if ext not in ['mp4', 'mov', 'avi']:
-            messagebox.showinfo("Not a Video", 
-                "YouTube Export only works with video files.\n\n"
-                f"File: {name}")
-            return
-        
-        # Ask where to save
-        output_path = filedialog.asksaveasfilename(
-            title="Export for YouTube",
-            defaultextension=".mp4",
-            initialfile=name.replace(f".{ext}", "_youtube.mp4"),
-            filetypes=[("MP4 files", "*.mp4"), ("All files", "*.*")]
-        )
-        
-        if not output_path:
-            return
-        
-        # Download to temp, then export
+    def _view_single_file(self, idx, name):
+        """Download and view a single file with warning dialog and cancel support"""
         import tempfile
-        temp_dir = tempfile.gettempdir()
-        temp_path = os.path.join(temp_dir, name)
         
-        self.set_status(f"Downloading {name}...")
+        # Get file size first
+        file_size_str = "Unknown size"
+        file_size_bytes = None
+        try:
+            result = subprocess.run(
+                ["gphoto2", "--list-files"],
+                capture_output=True, text=True, timeout=30
+            )
+            for line in result.stdout.split('\n'):
+                if line.strip().startswith(f'#{idx}'):
+                    parts = line.strip().split()
+                    if len(parts) >= 3:
+                        file_size_str = parts[2]
+                        # Try to parse for MB display
+                        try:
+                            size_val = float(parts[2][:-2])  # Remove MB/KB/etc
+                            size_unit = parts[2][-2:].upper()
+                            if size_unit == 'MB' and size_val > 100:
+                                file_size_str = f"{parts[2]} ({size_val/1000:.1f} GB)"
+                            elif size_unit == 'KB':
+                                file_size_str = f"{parts[2]} ({size_val/1000:.1f} MB)"
+                        except:
+                            pass
+                    break
+        except:
+            pass
         
-        def download_and_export():
+        # Check if it's a video (warn about large files)
+        ext = name.lower().split('.')[-1] if '.' in name else ''
+        is_video = ext in ['mp4', 'mov', 'avi']
+        
+        # Show warning/confirmation dialog
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Download Required")
+        dialog.geometry("450x250")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        
+        # Center dialog
+        dialog.update_idletasks()
+        x = (dialog.winfo_screenwidth() // 2) - 225
+        y = (dialog.winfo_screenheight() // 2) - 125
+        dialog.geometry(f"+{x}+{y}")
+        
+        # Icon and warning
+        ttk.Label(dialog, text="📥", font=("Arial", 32)).pack(pady=(10, 5))
+        
+        # Message
+        msg = f"The file must be downloaded before viewing.\n\n"
+        msg += f"File: {name}\n"
+        msg += f"Size: {file_size_str}\n"
+        
+        if is_video:
+            msg += "\n⚠️ This is a video file and may take\nseveral minutes to download."
+        
+        ttk.Label(dialog, text=msg, justify="center").pack(pady=10)
+        
+        # Progress frame (hidden initially)
+        progress_frame = ttk.Frame(dialog)
+        self.view_progress_var = tk.DoubleVar(value=0)
+        self.view_status_var = tk.StringVar(value="Ready to download...")
+        
+        ttk.Label(progress_frame, textvariable=self.view_status_var).pack()
+        ttk.Progressbar(progress_frame, variable=self.view_progress_var, 
+                       maximum=100, length=350).pack(pady=5)
+        
+        # Store cancel flag and thread
+        self.view_cancelled = False
+        self.view_thread = None
+        
+        def do_download():
+            download_btn.config(state=tk.DISABLED)
+            cancel_btn.config(text="Cancel Download", command=cancel_download)
+            progress_frame.pack(pady=10)
+            
+            temp_dir = tempfile.gettempdir()
+            temp_path = os.path.join(temp_dir, name)
+            
+            self.view_thread = threading.Thread(
+                target=download_worker,
+                args=(temp_path,)
+            )
+            self.view_thread.start()
+        
+        def download_worker(temp_path):
             try:
-                # Download
-                result = subprocess.run(
+                self.root.after(0, lambda: self.view_status_var.set("Downloading..."))
+                
+                # Start download process
+                process = subprocess.Popen(
                     ["gphoto2", "--get-file", str(idx), f"--filename={temp_path}"],
-                    capture_output=True, timeout=120
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE
                 )
                 
-                if result.returncode != 0 or not os.path.exists(temp_path):
-                    self.set_status("Download failed")
-                    messagebox.showerror("Error", "Failed to download video from camera.")
-                    return
+                # Poll for progress
+                while process.poll() is None:
+                    if self.view_cancelled:
+                        process.terminate()
+                        try:
+                            process.wait(timeout=5)
+                        except:
+                            process.kill()
+                        self.root.after(0, lambda: self.view_status_var.set("Download cancelled"))
+                        return
+                    
+                    time.sleep(0.5)
+                    
+                    # Update progress (animate since we don't have total)
+                    if os.path.exists(temp_path):
+                        current_size = os.path.getsize(temp_path)
+                        size_str = format_size_bytes(current_size)
+                        self.root.after(0, lambda s=size_str: 
+                            self.view_status_var.set(f"Downloaded: {s}"))
+                        # Animate progress bar
+                        current = self.view_progress_var.get()
+                        self.view_progress_var.set((current + 10) % 100)
                 
-                # Export for YouTube
-                self.set_status("Injecting 360° metadata...")
-                result = subprocess.run(
-                    ["python3", "km360_youtube_export.py", temp_path, output_path],
-                    capture_output=True, text=True, timeout=60
-                )
-                
-                if result.returncode == 0:
-                    self.set_status("Export complete!")
-                    messagebox.showinfo("Success", 
-                        f"Video exported successfully!\n\n"
-                        f"Saved to: {output_path}\n\n"
-                        "Ready to upload to YouTube with 360° playback.")
+                # Check result
+                if process.returncode == 0 and os.path.exists(temp_path):
+                    self.root.after(0, lambda: self.view_status_var.set("Opening viewer..."))
+                    subprocess.Popen(["python3", "km360_viewer.py", temp_path])
+                    self.root.after(0, dialog.destroy)
                 else:
-                    self.set_status("Export failed")
-                    messagebox.showerror("Error", result.stderr)
-                
-                # Cleanup temp file
-                try:
-                    os.remove(temp_path)
-                except:
-                    pass
+                    stderr = process.stderr.read().decode() if process.stderr else "Unknown error"
+                    self.root.after(0, lambda: self.view_status_var.set(f"Failed: {stderr[:50]}"))
+                    self.root.after(0, lambda: cancel_btn.config(text="Close", state=tk.NORMAL))
                     
             except Exception as e:
-                self.set_status(f"Error: {str(e)}")
+                self.root.after(0, lambda: self.view_status_var.set(f"Error: {str(e)}"))
         
-        threading.Thread(target=download_and_export).start()
+        def cancel_download():
+            self.view_cancelled = True
+            self.view_status_var.set("Cancelling...")
+            cancel_btn.config(state=tk.DISABLED)
+            # Dialog will close when thread finishes
+            self.root.after(2000, dialog.destroy)
+        
+        def close_dialog():
+            if self.view_thread and self.view_thread.is_alive():
+                self.view_cancelled = True
+                self.view_thread.join(timeout=2)
+            dialog.destroy()
+        
+        # Buttons
+        btn_frame = ttk.Frame(dialog)
+        btn_frame.pack(pady=10)
+        
+        download_btn = ttk.Button(btn_frame, text="Download & View", command=do_download)
+        download_btn.pack(side=tk.LEFT, padx=5)
+        
+        cancel_btn = ttk.Button(btn_frame, text="Cancel", command=close_dialog)
+        cancel_btn.pack(side=tk.LEFT, padx=5)
+        
+        progress_frame.pack_forget()  # Hide initially
+        
+        dialog.protocol("WM_DELETE_WINDOW", close_dialog)
+    
+    def export_selected_for_youtube(self):
+        """Download and export selected video(s) for YouTube - ignores non-video files"""
+        selected = self.file_tree.selection()
+        if not selected:
+            messagebox.showinfo("No Selection", "Please select video files to export.")
+            return
+        
+        # Get all selected files and filter to videos only (ignore images silently)
+        video_files = []
+        for item in selected:
+            idx = self.file_tree.index(item) + 1
+            values = self.file_tree.item(item, 'values')
+            name = values[0] if values else f"file_{idx}"
+            
+            # Check if it's a video
+            ext = name.lower().split('.')[-1] if '.' in name else ''
+            if ext in ['mp4', 'mov', 'avi', 'mkv']:
+                video_files.append((idx, name))
+        
+        if not video_files:
+            messagebox.showinfo("No Videos", 
+                "No video files selected.\n\n"
+                "YouTube Export only works with video files (mp4, mov, avi).")
+            return
+        
+        # If single video, use save dialog. If multiple, ask for directory
+        if len(video_files) == 1:
+            idx, name = video_files[0]
+            ext = name.lower().split('.')[-1]
+            output_path = filedialog.asksaveasfilename(
+                title="Export for YouTube",
+                defaultextension=".mp4",
+                initialfile=name.replace(f".{ext}", "_youtube.mp4"),
+                filetypes=[("MP4 files", "*.mp4"), ("All files", "*.*")]
+            )
+            if not output_path:
+                return
+            # Process single file
+            self._process_youtube_export(video_files, [output_path])
+        else:
+            # Multiple videos - ask for output directory
+            output_dir = filedialog.askdirectory(title="Select Output Directory for YouTube Exports")
+            if not output_dir:
+                return
+            # Generate output paths
+            output_paths = []
+            for idx, name in video_files:
+                ext = name.lower().split('.')[-1]
+                output_name = name.replace(f".{ext}", "_youtube.mp4")
+                output_paths.append(os.path.join(output_dir, output_name))
+            # Process all files
+            self._process_youtube_export(video_files, output_paths)
+    
+    def _process_youtube_export(self, video_files, output_paths):
+        """Process YouTube export using DownloadProgressDialog with checksum verification"""
+        # Use the download dialog in YouTube mode - it handles everything including retries
+        DownloadProgressDialog(self.root, video_files, None, self, 
+                              youtube_mode=True, youtube_output_paths=output_paths)
     
     def copy_filename(self):
         """Copy selected filename to clipboard"""
@@ -852,7 +1620,7 @@ class KM360GUI:
         """Check if camera is connected"""
         try:
             result = subprocess.run(["gphoto2", "--auto-detect"], 
-                                  capture_output=True, text=True, timeout=5)
+                                  capture_output=True, text=True, timeout=15)
             if "KeyMission 360" in result.stdout:
                 if not self.connected:
                     self.connect_camera()
@@ -872,7 +1640,7 @@ class KM360GUI:
         try:
             # Check if camera is present
             result = subprocess.run(["gphoto2", "--auto-detect"], 
-                                  capture_output=True, text=True, timeout=10)
+                                  capture_output=True, text=True, timeout=30)
             
             if "KeyMission 360" not in result.stdout:
                 messagebox.showerror("Connection Failed", 
@@ -881,8 +1649,19 @@ class KM360GUI:
                 self.set_status("Not connected")
                 return
             
-            # Get camera info
-            self.update_camera_info()
+            # Get camera info (with retry)
+            info_success = False
+            for attempt in range(3):
+                try:
+                    self.update_camera_info()
+                    info_success = True
+                    break
+                except Exception as e:
+                    if attempt < 2:
+                        self.set_status(f"Camera slow to respond, retrying... ({attempt+1}/3)")
+                        time.sleep(1)
+                    else:
+                        print(f"Warning: Could not get camera info: {e}")
             
             self.connected = True
             self.status_label.config(text="● Connected", foreground="green")
@@ -909,7 +1688,7 @@ class KM360GUI:
         try:
             # Get summary
             result = subprocess.run(["gphoto2", "--summary"], 
-                                  capture_output=True, text=True, timeout=10)
+                                  capture_output=True, text=True, timeout=30)
             
             # Parse info (simplified)
             lines = result.stdout.split('\n')
@@ -1006,34 +1785,131 @@ class KM360GUI:
         self.download_thread.start()
     
     def _download_files(self, files, dest):
-        """Download specific files (runs in thread)"""
-        total = len(files)
-        for i, (num, name) in enumerate(files, 1):
-            self.set_status(f"Downloading {name} ({i}/{total})...")
-            try:
-                subprocess.run(
-                    ["gphoto2", "--get-file", str(num), 
-                     f"--filename={dest}/{name}"],
-                    capture_output=True, timeout=300
-                )
-            except Exception as e:
-                print(f"Error downloading {name}: {e}")
-        
-        self.set_status(f"Downloaded {total} files to {dest}")
-        messagebox.showinfo("Download Complete", f"Downloaded {total} files.")
+        """Download specific files with progress tracking and resume support"""
+        self.show_download_progress_dialog(files, dest)
     
     def _download_all_files(self, dest):
-        """Download all files (runs in thread)"""
-        self.set_status("Downloading all files...")
+        """Download all files with progress tracking"""
+        # Get all files from tree
+        files = []
+        for item in self.file_tree.get_children():
+            idx = self.file_tree.index(item) + 1
+            values = self.file_tree.item(item, 'values')
+            if values:
+                name = values[0]
+                files.append((idx, name))
+        
+        if files:
+            self.show_download_progress_dialog(files, dest)
+        else:
+            self.root.after(0, lambda: messagebox.showinfo("No Files", "No files to download."))
+    
+    def show_download_progress_dialog(self, files, dest):
+        """Show download progress dialog with queue and resume support"""
+        DownloadProgressDialog(self.root, files, dest, self)
+    
+    def reset_usb_port(self):
+        """Reset the USB port the camera is connected to"""
+        if not USB_AVAILABLE:
+            messagebox.showerror("Error", 
+                "USB libraries not available. Install pyusb and libusb1:\n"
+                "pip install pyusb libusb1")
+            return
+        
+        self.set_status("Resetting USB port...")
+        
+        def do_reset():
+            try:
+                # Find the camera
+                context = usb1.USBContext()
+                camera_device = None
+                
+                for device in context.getDeviceIterator(skip_on_error=True):
+                    # Nikon vendor ID
+                    if device.getVendorID() == 0x04b0:
+                        camera_device = device
+                        break
+                
+                if not camera_device:
+                    self.root.after(0, lambda: messagebox.showinfo(
+                        "Camera Not Found", 
+                        "No Nikon camera found on USB bus.\n"
+                        "Make sure the camera is connected."))
+                    self.set_status("Camera not found for USB reset")
+                    return
+                
+                bus = camera_device.getBusNumber()
+                addr = camera_device.getDeviceAddress()
+                
+                self.set_status(f"Found camera at bus {bus}, addr {addr}")
+                
+                # Try to reset using usb.core (pyusb)
+                try:
+                    dev = usb.core.find(idVendor=0x04b0)
+                    if dev:
+                        dev.reset()
+                        self.set_status("USB port reset successful")
+                        self.root.after(0, lambda: messagebox.showinfo(
+                            "USB Reset", 
+                            "USB port has been reset.\n\n"
+                            "Wait a few seconds for the camera to reconnect,\n"
+                            "then click 'Connect' or 'Refresh'."))
+                        return
+                except Exception as e:
+                    print(f"pyusb reset failed: {e}")
+                
+                # Fallback: Try using usbreset via shell
+                try:
+                    result = subprocess.run(
+                        ["usbreset", f"/dev/bus/usb/{bus:03d}/{addr:03d}"],
+                        capture_output=True, text=True, timeout=30
+                    )
+                    if result.returncode == 0:
+                        self.set_status("USB port reset via usbreset")
+                        self.root.after(0, lambda: messagebox.showinfo(
+                            "USB Reset", 
+                            "USB port has been reset.\n\n"
+                            "Wait a few seconds for the camera to reconnect."))
+                        return
+                except FileNotFoundError:
+                    pass  # usbreset not available
+                
+                # Last resort: Try kernel driver unbind/bind if we can find it
+                self.root.after(0, lambda: self._try_sysfs_reset(bus, addr))
+                
+            except Exception as e:
+                self.set_status(f"USB reset failed: {str(e)}")
+                self.root.after(0, lambda: messagebox.showerror(
+                    "USB Reset Failed", 
+                    f"Failed to reset USB port:\n{str(e)}\n\n"
+                    "You may need to run with sudo or unplug/replug manually."))
+        
+        threading.Thread(target=do_reset).start()
+    
+    def _try_sysfs_reset(self, bus, addr):
+        """Try to reset USB device via sysfs"""
         try:
-            subprocess.run(
-                ["gphoto2", "--get-all-files", f"--folder={dest}"],
-                capture_output=True, timeout=600
+            # Find the device path
+            result = subprocess.run(
+                ["lsusb", "-s", f"{bus}:{addr}"],
+                capture_output=True, text=True, timeout=15
             )
-            self.set_status(f"All files downloaded to {dest}")
-            messagebox.showinfo("Download Complete", "All files downloaded.")
+            
+            # Try to reset using /dev/bus/usb
+            usbdev = f"/dev/bus/usb/{bus:03d}/{addr:03d}"
+            
+            # Check if we have a udev rule or can use sudo
+            messagebox.showinfo(
+                "Manual Reset Required",
+                f"Could not automatically reset USB port.\n\n"
+                f"Camera is at: {usbdev}\n\n"
+                "Options:\n"
+                "1. Unplug and replug the USB cable manually\n"
+                "2. Run: sudo usbreset " + usbdev + "\n"
+                "3. Install usbreset: sudo apt-get install usbutils\n\n"
+                "After reset, click 'Connect' to reconnect.")
         except Exception as e:
-            self.set_status(f"Download error: {str(e)}")
+            messagebox.showerror("Error", f"Could not determine USB device path: {e}")
     
     def delete_selected(self):
         """Delete selected files from camera"""
@@ -1069,7 +1945,7 @@ class KM360GUI:
         
         try:
             subprocess.run(["gphoto2", "--set-config", "datetime=now"], 
-                         capture_output=True, timeout=10)
+                         capture_output=True, timeout=30)
             self.set_status("Date/Time synchronized")
             messagebox.showinfo("Success", "Camera time synchronized with system time.")
         except Exception as e:
@@ -1106,7 +1982,7 @@ class KM360GUI:
         try:
             subprocess.run(["gphoto2", "--set-config", 
                           f"whitebalance={self.wb_var.get()}"], 
-                         capture_output=True, timeout=10)
+                         capture_output=True, timeout=30)
             self.set_status("White balance updated")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to set white balance: {str(e)}")
@@ -1120,7 +1996,7 @@ class KM360GUI:
         try:
             subprocess.run(["gphoto2", "--set-config", 
                           f"movielooplength={self.loop_var.get()}"], 
-                         capture_output=True, timeout=10)
+                         capture_output=True, timeout=30)
             self.set_status("Loop length updated")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to set loop length: {str(e)}")
@@ -1134,7 +2010,7 @@ class KM360GUI:
         try:
             subprocess.run(["gphoto2", "--set-config", 
                           f"capturetarget={self.target_var.get()}"], 
-                         capture_output=True, timeout=10)
+                         capture_output=True, timeout=30)
             self.set_status("Capture target updated")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to set capture target: {str(e)}")
@@ -1149,7 +2025,7 @@ class KM360GUI:
         try:
             subprocess.run(["gphoto2", "--set-config", 
                           f"/main/other/501f={copyright_text}"], 
-                         capture_output=True, timeout=10)
+                         capture_output=True, timeout=30)
             self.set_status("Copyright info set")
             messagebox.showinfo("Success", "Copyright info updated.")
         except Exception as e:
@@ -1184,10 +2060,10 @@ class KM360GUI:
             try:
                 subprocess.run(["gphoto2", "--set-config", 
                               f"/main/other/d338={ssid_var.get()}"], 
-                             capture_output=True, timeout=10)
+                             capture_output=True, timeout=30)
                 subprocess.run(["gphoto2", "--set-config", 
                               f"/main/other/d340={pass_var.get()}"], 
-                             capture_output=True, timeout=10)
+                             capture_output=True, timeout=30)
                 self.set_status("WiFi configuration updated")
                 messagebox.showinfo("Success", "WiFi settings updated.\n\n"
                                   "Note: You may need to re-pair with SnapBridge app.")
@@ -1207,7 +2083,7 @@ class KM360GUI:
         
         try:
             result = subprocess.run(["gphoto2", "--summary"], 
-                                  capture_output=True, text=True, timeout=10)
+                                  capture_output=True, text=True, timeout=30)
             
             dialog = tk.Toplevel(self.root)
             dialog.title("Camera Information")
@@ -1229,7 +2105,7 @@ class KM360GUI:
         
         try:
             result = subprocess.run(["gphoto2", "--storage-info"], 
-                                  capture_output=True, text=True, timeout=10)
+                                  capture_output=True, text=True, timeout=30)
             
             messagebox.showinfo("Storage Information", result.stdout)
             
@@ -1243,7 +2119,7 @@ class KM360GUI:
         
         try:
             result = subprocess.run(["gphoto2", "--summary"], 
-                                  capture_output=True, text=True, timeout=10)
+                                  capture_output=True, text=True, timeout=30)
             
             self.info_text.configure(state=tk.NORMAL)
             self.info_text.delete(1.0, tk.END)
@@ -1288,9 +2164,25 @@ class KM360GUI:
     
     def show_download_manager(self):
         """Show download manager"""
-        messagebox.showinfo("Download Manager", 
-            "The Download Manager is integrated into the main window.\n\n"
-            "Use the file browser on the left to select and download files.")
+        # Get all files from current file tree
+        files = []
+        for i, item in enumerate(self.file_tree.get_children(), 1):
+            values = self.file_tree.item(item, 'values')
+            if values:
+                name = values[0]
+                files.append((i, name))
+        
+        if not files:
+            messagebox.showinfo("No Files", "No files available. Connect to camera first.")
+            return
+        
+        # Ask for destination
+        dest = filedialog.askdirectory(title="Select Download Destination")
+        if not dest:
+            return
+        
+        # Show download dialog
+        DownloadProgressDialog(self.root, files, dest, self)
     
     def show_docs(self):
         """Show documentation"""
@@ -1338,7 +2230,7 @@ def run_headless_test():
     print("[TEST 1] Checking gphoto2 installation...")
     try:
         result = subprocess.run(["gphoto2", "--version"], 
-                              capture_output=True, text=True, timeout=5)
+                              capture_output=True, text=True, timeout=15)
         if result.returncode == 0:
             version = result.stdout.split('\n')[0]
             print(f"  ✓ gphoto2 found: {version}")
@@ -1353,12 +2245,12 @@ def run_headless_test():
     print("\n[TEST 2] Checking for KeyMission 360...")
     try:
         result = subprocess.run(["gphoto2", "--auto-detect"], 
-                              capture_output=True, text=True, timeout=5)
+                              capture_output=True, text=True, timeout=15)
         if "KeyMission 360" in result.stdout:
             print("  ✓ KeyMission 360 detected")
             # Get summary
             result = subprocess.run(["gphoto2", "--summary"], 
-                                  capture_output=True, text=True, timeout=10)
+                                  capture_output=True, text=True, timeout=30)
             for line in result.stdout.split('\n'):
                 if "Model:" in line:
                     print(f"    {line.strip()}")
