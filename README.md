@@ -26,6 +26,10 @@ The Nikon KeyMission 360 has limited physical controls (only 2 buttons) and can 
 | `km360_formatter.py` | Format SD card via raw PTP commands |
 | `km360_set_time.py` | **Sync camera time to system time** (fixes 2016 timestamp issue) |
 | `km360_info.py` | Display camera information and PTP endpoints |
+| `km360_download.py` | **Reliable download tool** with resume, checksums, retry |
+| `km360_usb_reset.py` | **USB port reset** when camera times out |
+| `km360_viewer.py` | **360° image/video viewer** - interactive equirectangular viewer |
+| `km360_youtube_export.py` | **YouTube export** - inject 360° metadata for upload |
 | `manual_format.sh` | Format SD card manually (without camera) |
 | `GPHOTO2_COMMANDS.md` | Complete gphoto2 command reference |
 | `RESEARCH.md` | Technical PTP protocol documentation |
@@ -76,12 +80,14 @@ python3 km360_gui.py
 ```
 
 Features:
-- 📁 **File Browser** - Browse and download photos/videos
+- 📁 **File Browser** - Browse and download photos/videos with batch selection
+- ⬇️ **Download Manager** - Progress bars, resume support, checksum verification
+- 🔄 **USB Reset** - Reset USB port when camera times out (no unplugging!)
 - ⚡ **Quick Actions** - Sync time, format SD, WiFi config
 - ⚙️ **Camera Settings** - White balance, movie mode, etc.
 - ℹ️ **Camera Info** - Battery, storage, firmware version
-- 👁️ **360° Viewer** - Interactive photo/video viewer
-- ▶️ **YouTube Export** - Inject 360° metadata for upload
+- 👁️ **360° Viewer** - Interactive photo/video viewer with download warning
+- ▶️ **YouTube Export** - Inject 360° metadata for upload (batch support)
 
 ### 2. Fix Date/Time (Most Important!)
 
@@ -267,15 +273,18 @@ See [RESEARCH.md](RESEARCH.md) for complete protocol documentation.
 
 ## 🐛 Troubleshooting
 
-### "Camera not found"
+### "Camera not found" / Timeout Errors
 - Ensure camera is connected via USB
 - Make sure camera is powered on (press Photo or Video button)
+- **Use USB Reset**: Click "🔄 Reset USB" button in GUI, or run `python3 km360_usb_reset.py`
 - Try unplugging and reconnecting USB
 - Check USB permissions (udev rules)
+- Check cable connection (try different USB port)
 
 ### "Could not claim interface"
 - Another program may be using the camera
 - Kill competing processes: `killall gphoto2 gvfs-gphoto2-volume-monitor`
+- Use USB Reset button to force release the interface
 
 ### "Invalid Storage ID"
 - Use `--list` to see current storage IDs

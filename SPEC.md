@@ -225,7 +225,26 @@ KeyMissionUtility.View
 
 ### 5.1 Completed Tools
 
-#### km360_gui.py (v1.5)
+#### km360_download.py (v1.6) - NEW
+- **Purpose**: Reliable file download with resume, checksums, and retry
+- **Features**:
+  - SHA256 checksum verification
+  - Automatic retry with exponential backoff (3 attempts)
+  - Resume partial downloads
+  - Progress reporting
+  - Size verification
+- **Usage**: `python3 km360_download.py 5 ~/Videos/file.mp4`
+
+#### km360_usb_reset.py (v1.6) - NEW
+- **Purpose**: Reset USB port when camera becomes unresponsive
+- **Features**:
+  - Auto-detect camera on USB bus
+  - Multiple reset methods (pyusb, usbreset, sysfs)
+  - No physical unplugging required
+  - Command-line and GUI integration
+- **Usage**: `python3 km360_usb_reset.py`
+
+#### km360_gui.py (v1.6)
 - **Purpose**: Main GUI application
 - **Features**:
   - File browser with right-click context menu
@@ -328,23 +347,32 @@ MainWindow (tkinter)
    - Connection status indicator
    - Disconnect/reconnect
 
-2. **File Browser**
+2. **File Browser** (v1.6)
    - Tree view of camera storage
    - File list with metadata (size, date, type)
-   - Select multiple files
+   - **Batch selection**: Ctrl+A (all), Ctrl+Click (multi), Shift+Click (range)
    - **Right-click context menu** (v1.5)
-     * View in 360° Viewer
-     * Export for YouTube
+     * View in 360° Viewer (with download warning for videos)
+     * Export for YouTube (ignores non-video files)
      * Download
      * Delete
      * Copy Filename
 
-3. **Download Manager**
-   - Download selected files
-   - Download all files
-   - Progress bar with ETA
-   - Organize by date folders
-   - Skip existing files
+3. **Download Manager** (v1.6)
+   - Download selected files with **progress dialog**
+   - Download all files with **queue management**
+   - **SHA256 checksum verification** for data integrity
+   - **Resume support** for interrupted downloads
+   - **Cancel button** during download
+   - **Retry failed** button for failed transfers
+   - Speed display and ETA estimation
+   - Shows file verification status
+
+4. **USB Port Reset** (v1.6)
+   - "🔄 Reset USB" button in file browser
+   - Resets USB port when camera times out
+   - No physical unplugging required
+   - Supports multiple reset methods
 
 4. **Settings Panel**
    - Date/Time sync (with auto-sync option)
@@ -359,32 +387,54 @@ MainWindow (tkinter)
    - Configure WiFi
    - Camera info display
 
-#### Implemented Features (v1.5)
-1. **360° Viewer** ✅ IMPLEMENTED
+#### Implemented Features (v1.5-v1.6)
+1. **360° Viewer** ✅ IMPLEMENTED (v1.5)
    - Equirectangular image viewer
    - **Mouse drag** to look around (change yaw/pitch)
    - **Scroll** to zoom (change FOV)
    - **WASD/Arrow keys** to navigate
    - Video playback with play/pause
    - Rectilinear projection (natural perspective)
+   - **Download warning** - warns before downloading large videos
+   - **Cancel option** during download
    - Standalone tool: `km360_viewer.py`
 
-2. **YouTube Export** ✅ IMPLEMENTED
+2. **YouTube Export** ✅ IMPLEMENTED (v1.5)
    - **No re-encoding** - fast metadata injection only
    - Injects Spatial Media metadata for 360° recognition
    - Batch processing support
+   - **Ignores non-video files** when batch selecting
    - Methods: ffmpeg or spatialmedia library
    - Standalone tool: `km360_youtube_export.py`
 
-#### File Browser ↔ Viewer Integration
+3. **Reliable Downloads** ✅ IMPLEMENTED (v1.6)
+   - SHA256 checksum verification
+   - Automatic retry (3 attempts)
+   - Resume partial downloads
+   - Progress dialog with cancel option
+   - Detailed error messages
+   - Standalone tool: `km360_download.py`
+
+4. **USB Reset** ✅ IMPLEMENTED (v1.6)
+   - Reset USB port without unplugging
+   - Multiple reset methods
+   - GUI button integration
+   - Standalone tool: `km360_usb_reset.py`
+
+#### File Browser ↔ Viewer Integration (v1.6)
 - Right-click any file → "View in 360° Viewer"
-  - Auto-downloads to temp location
+  - Shows download warning dialog with file size
+  - Special warning for video files (may take minutes)
+  - Progress bar during download
+  - **Cancel button** to abort download
   - Opens in viewer automatically
 - Viewer tab has Quick Open dropdown
   - Lists all camera files
   - One-click open in viewer
 - YouTube Export from file browser
-  - Right-click video → "Export for YouTube"
+  - Right-click files → "Export for YouTube"
+  - **Ignores non-video files** (images skipped silently)
+  - Shows progress dialog with verification
   - Downloads → Injects metadata → Saves
 
 #### Planned Features (v2.0+)
@@ -620,6 +670,28 @@ This project is especially valuable for:
 
 ## Changelog
 
+### v1.6 (2026-03-10)
+- **NEW**: Reliable Download Tool (`km360_download.py`)
+  - SHA256 checksum verification
+  - Resume support for partial downloads
+  - Automatic retry with exponential backoff
+  - Command-line interface
+- **NEW**: USB Reset Tool (`km360_usb_reset.py`)
+  - Reset USB port without unplugging camera
+  - Multiple reset methods
+  - GUI integration with "🔄 Reset USB" button
+- **GUI Enhancements**:
+  - Download Manager with progress bars and cancel buttons
+  - Batch file selection (Ctrl+A, Ctrl+Click, Shift+Click)
+  - File integrity verification (checksums)
+  - Download warning dialog for 360° Viewer (shows file size)
+  - YouTube Export ignores non-video files when batch selecting
+  - Retry failed downloads button
+- **Improved Error Handling**:
+  - Detailed error messages for failed downloads
+  - Size mismatch detection
+  - Corrupt file detection via checksums
+
 ### v1.5 (2026-03-10)
 - **NEW**: 360° Image/Video Viewer (`km360_viewer.py`)
   - Interactive equirectangular viewer
@@ -644,6 +716,6 @@ This project is especially valuable for:
 
 ---
 
-*Document Version: 1.5*
+*Document Version: 1.6*
 *Date: 2026-03-10*
 *Authors: AI Assistant / Claude Code*
