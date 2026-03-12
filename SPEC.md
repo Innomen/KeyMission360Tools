@@ -244,16 +244,18 @@ KeyMissionUtility.View
   - Command-line and GUI integration
 - **Usage**: `python3 km360_usb_reset.py`
 
-#### km360_gui.py (v1.6)
+#### km360_gui.py (v1.7)
 - **Purpose**: Main GUI application
 - **Features**:
   - File browser with right-click context menu
-  - Download manager
+  - Download manager with auto 360° metadata injection
   - Settings configuration
   - 360° Viewer integration
-  - YouTube Export integration
+  - Native file dialogs (GTK/KDE) with Places sidebar
+  - USB port memory for faster reset
   - Quick Actions tab
   - Camera info display
+  - Add to Start Menu integration
 
 #### km360_formatter.py
 - **Purpose**: Format SD card via raw PTP
@@ -347,45 +349,53 @@ MainWindow (tkinter)
    - Connection status indicator
    - Disconnect/reconnect
 
-2. **File Browser** (v1.6)
-   - Tree view of camera storage
+2. **File Browser** (v1.7)
+   - Tree view of camera storage with hidden file number tracking
    - File list with metadata (size, date, type)
    - **Batch selection**: Ctrl+A (all), Ctrl+Click (multi), Shift+Click (range)
-   - **Right-click context menu** (v1.5)
+   - **Right-click context menu** (v1.7)
      * View in 360° Viewer (with download warning for videos)
-     * Export for YouTube (ignores non-video files)
-     * Download
-     * Delete
+     * Download (with options dialog)
+     * Delete (now works with proper folder paths)
      * Copy Filename
 
-3. **Download Manager** (v1.6)
-   - Download selected files with **progress dialog**
-   - Download all files with **queue management**
+3. **Download Manager** (v1.7)
+   - Download selected/all files with **progress dialog**
+   - **Options dialog** with "Remove from camera after download" checkbox
+   - **Auto 360° metadata injection** for all videos (YouTube-ready)
    - **SHA256 checksum verification** for data integrity
    - **Resume support** for interrupted downloads
    - **Cancel button** during download
    - **Retry failed** button for failed transfers
    - Speed display and ETA estimation
-   - Shows file verification status
+   - Native file dialogs (GTK/KDE) with Places sidebar
+   - Remembers last download directory
 
-4. **USB Port Reset** (v1.6)
+4. **USB Port Reset** (v1.7)
    - "🔄 Reset USB" button in file browser
+   - **USB port memory** - remembers last port for faster reset
    - Resets USB port when camera times out
    - No physical unplugging required
-   - Supports multiple reset methods
+   - Supports multiple reset methods (pyusb, usbreset, sysfs)
 
-4. **Settings Panel**
+5. **Settings Panel** (v1.7)
    - Date/Time sync (with auto-sync option)
    - White Balance
    - Movie Mode
    - Loop Length
    - Capture Target
+   - File dialog preference (Auto/GTK/KDE/Tk)
 
-5. **Quick Actions**
+6. **Quick Actions**
    - Format SD card (with confirmation)
    - Set Copyright info
    - Configure WiFi
    - Camera info display
+
+7. **Help Menu** (v1.7)
+   - Add to Start Menu integration
+   - Documentation viewer
+   - About dialog
 
 #### Implemented Features (v1.5-v1.6)
 1. **360° Viewer** ✅ IMPLEMENTED (v1.5)
@@ -399,13 +409,11 @@ MainWindow (tkinter)
    - **Cancel option** during download
    - Standalone tool: `km360_viewer.py`
 
-2. **YouTube Export** ✅ IMPLEMENTED (v1.5)
+2. **YouTube Export** ✅ INTEGRATED (v1.7)
+   - **Auto-injected on all video downloads** - no separate step needed
    - **No re-encoding** - fast metadata injection only
    - Injects Spatial Media metadata for 360° recognition
-   - Batch processing support
-   - **Ignores non-video files** when batch selecting
-   - Methods: ffmpeg or spatialmedia library
-   - Standalone tool: `km360_youtube_export.py`
+   - Standalone tool still available: `km360_youtube_export.py`
 
 3. **Reliable Downloads** ✅ IMPLEMENTED (v1.6)
    - SHA256 checksum verification
@@ -421,21 +429,23 @@ MainWindow (tkinter)
    - GUI button integration
    - Standalone tool: `km360_usb_reset.py`
 
-#### File Browser ↔ Viewer Integration (v1.6)
+#### File Browser Integration (v1.7)
 - Right-click any file → "View in 360° Viewer"
   - Shows download warning dialog with file size
   - Special warning for video files (may take minutes)
   - Progress bar during download
   - **Cancel button** to abort download
   - Opens in viewer automatically
+- Right-click delete now works correctly
+  - Properly deletes from camera storage folders
+  - Shows success/failure count
 - Viewer tab has Quick Open dropdown
   - Lists all camera files
   - One-click open in viewer
-- YouTube Export from file browser
-  - Right-click files → "Export for YouTube"
-  - **Ignores non-video files** (images skipped silently)
-  - Shows progress dialog with verification
-  - Downloads → Injects metadata → Saves
+- **Automatic 360° metadata injection** (v1.7)
+  - All video downloads automatically get YouTube-ready metadata
+  - Uses ffmpeg (fast, no re-encoding)
+  - Status shown in download progress
 
 #### Planned Features (v2.0+)
 1. **Enhanced Video Player**
@@ -470,7 +480,8 @@ Python 3.8+
 ├── gphoto2 (system package)
 ├── libgphoto2 (system package)
 ├── tkinter (built-in)
-└── usb1 (for raw PTP)
+├── usb1 (for raw PTP)
+└── python3-gi (optional, for native GTK dialogs)
 ```
 
 #### GUI Application
@@ -478,7 +489,8 @@ Python 3.8+
 ├── tkinter (built-in)
 ├── subprocess (built-in)
 ├── threading (built-in)
-└── pathlib (built-in)
+├── pathlib (built-in)
+└── gi (optional, for native file dialogs)
 ```
 
 #### 360° Viewer
@@ -669,6 +681,25 @@ This project is especially valuable for:
 ---
 
 ## Changelog
+
+### v1.7 (2026-03-11)
+- **NEW**: Configuration Module (`km360_config.py`)
+  - Native GTK/KDE file dialogs with Places sidebar
+  - Remembers last download directory
+  - Settings persistence in `~/.config/km360/`
+- **NEW**: Desktop Installer (`km360_install_desktop.py`)
+  - Add to GNOME/KDE/XFCE Start Menu
+  - Generates application icon automatically
+- **GUI Enhancements**:
+  - **Removed separate YouTube Export tab** - metadata now auto-injected for all videos
+  - **Download options dialog** with "Remove from camera" checkbox
+  - **USB port memory** - remembers last port for faster reset
+  - **Fixed right-click delete** - now works with proper camera folder paths
+  - File browser stores actual gphoto2 file numbers for accuracy
+- **YouTube Integration**:
+  - All video downloads automatically get 360° metadata injected
+  - Uses ffmpeg (fast, no re-encoding)
+  - Videos are YouTube-ready immediately after download
 
 ### v1.6 (2026-03-10)
 - **NEW**: Reliable Download Tool (`km360_download.py`)
