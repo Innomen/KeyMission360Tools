@@ -1266,6 +1266,14 @@ class KM360GUI:
         wifi_frame.pack(fill=tk.X, pady=5)
         ttk.Button(wifi_frame, text="Configure WiFi...", 
                   command=self.configure_wifi).pack()
+        
+        # Application
+        app_frame = ttk.LabelFrame(actions_frame, text="Application", padding=10)
+        app_frame.pack(fill=tk.X, pady=5)
+        ttk.Button(app_frame, text="🚀 Add to Start Menu...", 
+                  command=self.install_desktop_entry).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Button(app_frame, text="Settings...", 
+                  command=self.show_settings).pack(side=tk.LEFT)
     
     def setup_settings_tab(self):
         """Setup camera settings tab"""
