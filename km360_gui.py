@@ -2325,7 +2325,9 @@ class KM360GUI:
     
     def show_settings(self):
         """Show application settings"""
-        dialog = tk.Toplevel(self.root)
+        # Keep reference to prevent garbage collection
+        self.settings_dialog = tk.Toplevel(self.root)
+        dialog = self.settings_dialog
         dialog.title("Application Settings")
         dialog.geometry("450x450")
         dialog.transient(self.root)
@@ -2441,11 +2443,19 @@ class KM360GUI:
             with open("README.md", "r") as f:
                 content = f.read()
             
-            dialog = tk.Toplevel(self.root)
-            dialog.title("Documentation")
-            dialog.geometry("800x600")
+            # Keep reference to prevent garbage collection
+            self.docs_dialog = tk.Toplevel(self.root)
+            self.docs_dialog.title("Documentation")
+            self.docs_dialog.geometry("800x600")
+            self.docs_dialog.transient(self.root)
             
-            text = scrolledtext.ScrolledText(dialog, wrap=tk.WORD)
+            # Add close button frame
+            btn_frame = ttk.Frame(self.docs_dialog)
+            btn_frame.pack(fill=tk.X, padx=10, pady=(0, 10))
+            ttk.Button(btn_frame, text="Close", 
+                      command=self.docs_dialog.destroy).pack(side=tk.RIGHT)
+            
+            text = scrolledtext.ScrolledText(self.docs_dialog, wrap=tk.WORD)
             text.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
             text.insert(tk.END, content)
             text.configure(state=tk.DISABLED)
@@ -2501,6 +2511,7 @@ The desktop entry will be installed for the current user.
         
         def do_install():
             try:
+                import subprocess
                 result = subprocess.run(
                     ["python3", "km360_install_desktop.py"],
                     capture_output=True, text=True, timeout=30
@@ -2512,8 +2523,9 @@ The desktop entry will be installed for the current user.
                         parent=dialog)
                     status_var.set(f"✓ Installed\n  {desktop_file}")
                 else:
+                    error_msg = result.stderr if result.stderr else "Unknown error"
                     messagebox.showerror("Error", 
-                        f"Installation failed:\n{result.stderr}",
+                        f"Installation failed:\n{error_msg}",
                         parent=dialog)
             except Exception as e:
                 messagebox.showerror("Error", 
@@ -2532,14 +2544,21 @@ The desktop entry will be installed for the current user.
                 "Remove KeyMission 360 Utility from the Start Menu?",
                 parent=dialog):
                 try:
+                    import subprocess
                     result = subprocess.run(
                         ["python3", "km360_install_desktop.py", "--remove"],
                         capture_output=True, text=True, timeout=30
                     )
-                    messagebox.showinfo("Removed", 
-                        "Desktop entry removed.",
-                        parent=dialog)
-                    status_var.set("Not installed")
+                    if result.returncode == 0:
+                        messagebox.showinfo("Removed", 
+                            "Desktop entry removed.",
+                            parent=dialog)
+                        status_var.set("Not installed")
+                    else:
+                        error_msg = result.stderr if result.stderr else "Unknown error"
+                        messagebox.showerror("Error", 
+                            f"Remove failed:\n{error_msg}",
+                            parent=dialog)
                 except Exception as e:
                     messagebox.showerror("Error", str(e), parent=dialog)
         
