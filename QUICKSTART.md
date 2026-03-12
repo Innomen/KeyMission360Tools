@@ -31,8 +31,9 @@ python3 km360_download.py --all ~/Pictures/KM360/
 | `python3 km360_set_time.py` | Sync camera time to system |
 | `python3 km360_download.py <num> <path>` | Download file with resume/checksum |
 | `python3 km360_download.py --all <dir>` | Download all files |
-| `python3 km360_usb_reset.py` | Reset USB port (no unplugging) |
+| `python3 km360_usb_reset.py` | Reset USB port (no unplugging, remembers last port) |
 | `python3 km360_info.py` | Show camera information |
+| `python3 km360_install_desktop.py` | Add to Start Menu / application menu |
 
 ## If You Get Permission Errors
 
@@ -75,6 +76,7 @@ format F: /FS:FAT32 /V:KM360
   python3 km360_usb_reset.py
   ```
 - Or click "🔄 Reset USB" button in GUI
+  - The reset remembers the last USB port for faster operation
 - Unplug and reconnect USB (if reset fails)
 - Check camera is powered on
 
@@ -97,3 +99,9 @@ python3 km360_download.py 5 ~/Videos/myvideo.mp4
 
 # It will auto-retry and verify checksums
 ```
+
+## YouTube Upload
+
+Videos downloaded through the GUI are automatically processed with 360° metadata for YouTube upload. Just download and upload - no extra steps needed!
+
+To delete files from camera after download, check the "Remove from camera" option in the download dialog.

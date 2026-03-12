@@ -29,7 +29,9 @@ The Nikon KeyMission 360 has limited physical controls (only 2 buttons) and can 
 | `km360_download.py` | **Reliable download tool** with resume, checksums, retry |
 | `km360_usb_reset.py` | **USB port reset** when camera times out |
 | `km360_viewer.py` | **360° image/video viewer** - interactive equirectangular viewer |
-| `km360_youtube_export.py` | **YouTube export** - inject 360° metadata for upload |
+| `km360_config.py` | **Configuration** - Native file dialogs, settings persistence |
+| `km360_install_desktop.py` | **Desktop installer** - Add to Start Menu / application menu |
+| `km360_youtube_export.py` | **YouTube export** - Standalone 360° metadata injection |
 | `manual_format.sh` | Format SD card manually (without camera) |
 | `GPHOTO2_COMMANDS.md` | Complete gphoto2 command reference |
 | `RESEARCH.md` | Technical PTP protocol documentation |
@@ -82,12 +84,15 @@ python3 km360_gui.py
 Features:
 - 📁 **File Browser** - Browse and download photos/videos with batch selection
 - ⬇️ **Download Manager** - Progress bars, resume support, checksum verification
-- 🔄 **USB Reset** - Reset USB port when camera times out (no unplugging!)
+- 🎬 **Auto YouTube 360°** - Videos automatically get 360° metadata for YouTube upload
+- 🗑️ **Delete from Camera** - Option to remove files after successful download
+- 🔄 **USB Reset with Memory** - Reset USB port when camera times out (remembers last port)
 - ⚡ **Quick Actions** - Sync time, format SD, WiFi config
 - ⚙️ **Camera Settings** - White balance, movie mode, etc.
 - ℹ️ **Camera Info** - Battery, storage, firmware version
 - 👁️ **360° Viewer** - Interactive photo/video viewer with download warning
-- ▶️ **YouTube Export** - Inject 360° metadata for upload (batch support)
+- 🖥️ **Native File Dialogs** - GTK/KDE file choosers with Places sidebar
+- 🚀 **Start Menu Integration** - Add to GNOME/KDE/XFCE application menu
 
 ### 2. Fix Date/Time (Most Important!)
 
@@ -277,6 +282,7 @@ See [RESEARCH.md](RESEARCH.md) for complete protocol documentation.
 - Ensure camera is connected via USB
 - Make sure camera is powered on (press Photo or Video button)
 - **Use USB Reset**: Click "🔄 Reset USB" button in GUI, or run `python3 km360_usb_reset.py`
+  - The reset button remembers the last USB port for faster reset
 - Try unplugging and reconnecting USB
 - Check USB permissions (udev rules)
 - Check cable connection (try different USB port)
@@ -294,6 +300,35 @@ See [RESEARCH.md](RESEARCH.md) for complete protocol documentation.
 - The camera has no RTC battery
 - **Use the time sync tool:** `python3 km360_set_time.py`
 - Or manually: `gphoto2 --set-config datetime=now`
+
+## 🎬 YouTube Upload
+
+**Video files are automatically processed for YouTube upload!** When you download videos:
+
+1. The video is downloaded with resume/checksum support
+2. **360° spherical metadata is automatically injected** using ffmpeg
+3. The result is a YouTube-ready MP4 that will show 360° playback
+
+No separate export step needed - just download and upload to YouTube!
+
+> **Note:** The metadata injection is fast and doesn't re-encode the video, so quality is preserved.
+
+## 🖥️ Adding to Start Menu
+
+To add the KeyMission 360 Utility to your application menu:
+
+```bash
+# Interactive install
+python3 km360_install_desktop.py
+
+# Check status
+python3 km360_install_desktop.py --check
+
+# Remove from menu
+python3 km360_install_desktop.py --remove
+```
+
+Or use the GUI: **Help → Add to Start Menu...**
 
 ## 📚 Further Reading
 

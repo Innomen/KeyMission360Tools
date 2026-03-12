@@ -33,6 +33,12 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
+# Import our config and native dialogs
+from km360_config import (
+    ask_directory, ask_saveas_filename, ask_open_filename,
+    load_config, save_config, get_config_value, set_config_value
+)
+
 # USB imports for port cycling
 try:
     import usb1
@@ -96,19 +102,19 @@ class PlaceholderDialog:
 class DownloadProgressDialog:
     """Download manager dialog with progress bar, resume support, checksum verification, and queue"""
     
-    def __init__(self, parent, files, dest, main_app, youtube_mode=False, youtube_output_paths=None):
+    def __init__(self, parent, files, dest, main_app, delete_after=False):
         self.parent = parent
         self.files = files  # List of (num, name) tuples
         self.dest = dest
         self.main_app = main_app
-        self.youtube_mode = youtube_mode  # If True, process for YouTube export
-        self.youtube_output_paths = youtube_output_paths  # Output paths for YouTube mode
+        self.delete_after = delete_after  # Delete files from camera after successful download
         self.downloading = False
         self.cancelled = False
         self.current_index = 0
         self.failed_files = []
         self.completed_files = []
         self.file_checksums = {}  # Store checksums for verification
+        self.deleted_files = []  # Track which files were deleted from camera
         
         # Create dialog
         self.window = tk.Toplevel(parent)
@@ -434,8 +440,13 @@ class DownloadProgressDialog:
         
         return False, f"Failed after {max_retries} attempts: {last_error}"
     
+    def _is_video_file(self, filename):
+        """Check if file is a video based on extension"""
+        ext = filename.lower().split('.')[-1] if '.' in filename else ''
+        return ext in ['mp4', 'mov', 'avi', 'mkv', 'm4v']
+
     def _download_worker(self):
-        """Main download worker thread"""
+        """Main download worker thread - auto-injects 360° metadata for videos"""
         import tempfile
         import shutil
         
@@ -447,15 +458,10 @@ class DownloadProgressDialog:
                 break
             
             self.current_index = i
+            dest_path = os.path.join(self.dest, file_name)
             
-            # Determine paths based on mode
-            if self.youtube_mode and self.youtube_output_paths:
-                temp_dir = tempfile.gettempdir()
-                dest_path = os.path.join(temp_dir, file_name)
-                final_output = self.youtube_output_paths[i]
-            else:
-                dest_path = os.path.join(self.dest, file_name)
-                final_output = None
+            # Check if this is a video file (for metadata injection)
+            is_video = self._is_video_file(file_name)
             
             # Update UI
             self.window.after(0, lambda n=file_name, idx=i: self._update_current_file(n, idx))
@@ -475,8 +481,13 @@ class DownloadProgressDialog:
                     valid, checksum, msg = self._verify_file_integrity(dest_path, camera_size)
                     if valid:
                         self.file_checksums[file_name] = checksum
-                        self.window.after(0, lambda idx=i, cs=checksum[:16]: 
-                            self._mark_verified(idx, cs))
+                        # For videos, check if metadata already injected
+                        if is_video:
+                            self.window.after(0, lambda idx=i, cs=checksum[:16]: 
+                                self._mark_verified(idx, f"{cs} (360° ready)"))
+                        else:
+                            self.window.after(0, lambda idx=i, cs=checksum[:16]: 
+                                self._mark_verified(idx, cs))
                         self.completed_files.append((file_num, file_name))
                         continue
                     else:
@@ -502,23 +513,50 @@ class DownloadProgressDialog:
                 if valid:
                     self.file_checksums[file_name] = checksum
                     
-                    # If YouTube mode, process the video
-                    if self.youtube_mode and final_output:
+                    # If video, inject 360° metadata for YouTube
+                    if is_video:
                         self.window.after(0, lambda: self.status_var.set("Injecting 360° metadata..."))
-                        yt_success, yt_message = self._process_youtube_video(dest_path, final_output)
+                        temp_output = dest_path + ".yt_temp.mp4"
+                        yt_success, yt_message = self._inject_youtube_metadata(dest_path, temp_output)
                         
                         if yt_success:
-                            self.completed_files.append((file_num, file_name))
-                            self.window.after(0, lambda idx=i, cs=checksum[:16]: 
-                                self._mark_completed(idx, f"Exported", cs))
+                            # Replace original with metadata-injected version
+                            try:
+                                os.replace(temp_output, dest_path)
+                                status_msg = "Downloaded + 360° metadata"
+                            except Exception as e:
+                                # If replace fails, keep the original
+                                try:
+                                    os.remove(temp_output)
+                                except:
+                                    pass
+                                status_msg = "Downloaded (meta failed)"
                         else:
-                            self.failed_files.append((file_num, file_name, yt_message))
-                            self.window.after(0, lambda idx=i, err=yt_message: 
-                                self._mark_failed(idx, err))
+                            # Metadata injection failed, but keep the original download
+                            try:
+                                if os.path.exists(temp_output):
+                                    os.remove(temp_output)
+                            except:
+                                pass
+                            status_msg = "Downloaded (no 360° meta)"
                     else:
-                        self.completed_files.append((file_num, file_name))
+                        status_msg = "Downloaded"
+                    
+                    # Delete from camera if requested (after successful download+verify)
+                    if self.delete_after:
+                        self.window.after(0, lambda: self.status_var.set("Deleting from camera..."))
+                        if self._delete_file_from_camera(file_num):
+                            self.deleted_files.append(file_name)
+                            self.window.after(0, lambda idx=i, cs=checksum[:16]: 
+                                self._mark_completed(idx, f"{status_msg} + deleted", cs))
+                        else:
+                            self.window.after(0, lambda idx=i, cs=checksum[:16]: 
+                                self._mark_completed(idx, f"{status_msg} (del failed)", cs))
+                    else:
                         self.window.after(0, lambda idx=i, cs=checksum[:16]: 
-                            self._mark_completed(idx, "Completed", cs))
+                            self._mark_completed(idx, status_msg, cs))
+                    
+                    self.completed_files.append((file_num, file_name))
                 else:
                     self.failed_files.append((file_num, file_name, f"Verify failed: {msg}"))
                     self.window.after(0, lambda idx=i: self._mark_failed(idx, "Checksum failed"))
@@ -540,33 +578,67 @@ class DownloadProgressDialog:
         self.downloading = False
         self.window.after(0, self._download_complete)
     
-    def _process_youtube_video(self, temp_path, output_path):
-        """Process video for YouTube with 360° metadata"""
+    def _inject_youtube_metadata(self, input_file, output_file):
+        """Inject 360° metadata using ffmpeg (no re-encode)"""
         try:
+            cmd = [
+                "ffmpeg", "-y", "-i", input_file,
+                "-c", "copy",  # Copy streams without re-encoding
+                "-movflags", "+faststart",  # Web-optimized
+                "-strict", "unofficial",  # Allow experimental features
+                "-metadata:s:v:0", "spherical=1",
+                "-metadata:s:v:0", "stereo_mode=mono",
+                output_file
+            ]
+            
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            return result.returncode == 0, result.stderr if result.stderr else "Success"
+        except Exception as e:
+            return False, str(e)
+
+    def _delete_file_from_camera(self, file_num):
+        """Delete a file from the camera after successful export"""
+        try:
+            print(f"[DEBUG] Attempting to delete file #{file_num} from camera...")
+            
+            # Try different methods to delete the file
+            # Method 1: Direct delete
             result = subprocess.run(
-                ["python3", "km360_youtube_export.py", temp_path, output_path],
-                capture_output=True, text=True, timeout=60
+                ["gphoto2", "--delete-file", str(file_num)],
+                capture_output=True, text=True, timeout=30
             )
             
-            # Clean up temp file
-            try:
-                os.remove(temp_path)
-            except:
-                pass
+            if result.returncode == 0:
+                print(f"[DEBUG] Delete successful (method 1)")
+                return True
+            
+            # Method 2: Try with recurse flag
+            result = subprocess.run(
+                ["gphoto2", "--recurse", "--delete-file", str(file_num)],
+                capture_output=True, text=True, timeout=30
+            )
             
             if result.returncode == 0:
-                return True, "OK"
-            else:
-                return False, result.stderr if result.stderr else "Export failed"
-                
+                print(f"[DEBUG] Delete successful (method 2 - recurse)")
+                return True
+            
+            # Method 3: Try common folder paths
+            common_folders = ["/store_00010001", "/store_00000001", "/DCIM", "/DCIM/100NIKON"]
+            for folder in common_folders:
+                result = subprocess.run(
+                    ["gphoto2", "--folder", folder, "--delete-file", str(file_num)],
+                    capture_output=True, text=True, timeout=30
+                )
+                if result.returncode == 0:
+                    print(f"[DEBUG] Delete successful (method 3 - folder {folder})")
+                    return True
+            
+            print(f"[DEBUG] All delete methods failed. Last error: {result.stderr}")
+            return False
+            
         except Exception as e:
-            # Clean up temp file on error
-            try:
-                if os.path.exists(temp_path):
-                    os.remove(temp_path)
-            except:
-                pass
-            return False, str(e)
+            print(f"[DEBUG] Exception deleting file {file_num}: {e}")
+            return False
     
     def _update_current_file(self, name, index):
         """Update UI for current file"""
@@ -614,6 +686,14 @@ class DownloadProgressDialog:
         self.queue_tree.item(item, 
             values=("✓ Verified", values[1], "Exists", checksum + "..." if checksum else "OK"), 
             tags=('completed',))
+
+    def _mark_exported_and_deleted(self, index):
+        """Mark file as exported and deleted from camera"""
+        item = self.queue_tree.get_children()[index]
+        values = self.queue_tree.item(item, 'values')
+        self.queue_tree.item(item, 
+            values=("✓ Exported+Deleted", values[1], "Deleted", "OK"), 
+            tags=('completed',))
     
     def _update_overall_progress(self, completed, total, eta_seconds):
         """Update overall progress bar"""
@@ -636,7 +716,7 @@ class DownloadProgressDialog:
         """Called when download is complete"""
         self.cancel_btn.config(state=tk.DISABLED)
         
-        mode_str = "Export" if self.youtube_mode else "Download"
+        deleted_count = len(self.deleted_files)
         
         if self.failed_files:
             self.retry_btn.config(state=tk.NORMAL)
@@ -647,26 +727,38 @@ class DownloadProgressDialog:
             if len(self.failed_files) > 5:
                 error_details += f"\n... and {len(self.failed_files) - 5} more"
             
-            messagebox.showwarning(f"{mode_str} Complete", 
-                f"{mode_str}ed {len(self.completed_files)} files.\n"
-                f"Failed: {len(self.failed_files)} files.\n\n"
+            delete_msg = f"\nDeleted from camera: {deleted_count} files" if (self.delete_after and deleted_count > 0) else ""
+            
+            messagebox.showwarning("Download Complete", 
+                f"Downloaded {len(self.completed_files)} files.\n"
+                f"Failed: {len(self.failed_files)} files.{delete_msg}\n\n"
                 f"Details:\n{error_details}\n\n"
                 "Click 'Retry Failed' to attempt again.")
         elif self.cancelled:
-            self.status_var.set(f"{mode_str} cancelled")
-            messagebox.showinfo(f"{mode_str} Cancelled", 
-                f"{mode_str}ed {len(self.completed_files)} files before cancellation.")
+            self.status_var.set("Download cancelled")
+            messagebox.showinfo("Download Cancelled", 
+                f"Downloaded {len(self.completed_files)} files before cancellation.")
         else:
-            self.status_var.set(f"All {mode_str.lower()}s complete!")
+            self.status_var.set("All downloads complete!")
             self.overall_var.set(len(self.files))
             self.current_progress_var.set(100)
-            messagebox.showinfo(f"{mode_str} Complete", 
-                f"Successfully {mode_str}ed {len(self.completed_files)} files!")
+            
+            # Build success message
+            msg = f"Successfully downloaded {len(self.completed_files)} files!"
+            if deleted_count > 0:
+                msg += f"\n\nDeleted {deleted_count} files from camera."
+            
+            # Count videos with metadata
+            video_count = sum(1 for _, name in self.completed_files 
+                            if self._is_video_file(name))
+            if video_count > 0:
+                msg += f"\n\nVideos processed with 360° metadata: {video_count}"
+            
+            messagebox.showinfo("Download Complete", msg)
         
-        # Refresh main app file list
-        if not self.youtube_mode:
-            self.main_app.set_status(f"Downloaded {len(self.completed_files)} files")
-            self.main_app.refresh_files()
+        # Refresh main app file list (files may have been deleted)
+        self.main_app.set_status(f"Downloaded {len(self.completed_files)} files")
+        self.main_app.refresh_files()
 
 
 class KM360GUI:
@@ -735,6 +827,9 @@ class KM360GUI:
         help_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Help", menu=help_menu)
         help_menu.add_command(label="Documentation", command=self.show_docs)
+        help_menu.add_separator()
+        help_menu.add_command(label="Add to Start Menu...", command=self.install_desktop_entry)
+        help_menu.add_separator()
         help_menu.add_command(label="About", command=self.show_about)
     
     def setup_main_layout(self):
@@ -787,10 +882,14 @@ class KM360GUI:
         files_frame = ttk.LabelFrame(self.left_frame, text="Camera Files", padding=5)
         files_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
-        # Treeview for files
-        columns = ("name", "size", "date")
+        # Treeview for files - include file_num as hidden column
+        columns = ("name", "size", "date", "file_num")
         self.file_tree = ttk.Treeview(files_frame, columns=columns, 
                                       show="headings", selectmode="extended")
+        
+        # Hide the file_num column (used internally)
+        self.file_tree.column("file_num", width=0, stretch=False)
+        self.file_tree.heading("file_num", text="")
         
         self.file_tree.heading("name", text="Name")
         self.file_tree.heading("size", text="Size")
@@ -868,8 +967,6 @@ class KM360GUI:
         self.file_context_menu = tk.Menu(self.root, tearoff=0)
         self.file_context_menu.add_command(label="👁️ View in 360° Viewer", 
                                           command=self.view_selected_in_viewer)
-        self.file_context_menu.add_command(label="▶️ Export for YouTube", 
-                                          command=self.export_selected_for_youtube)
         self.file_context_menu.add_separator()
         self.file_context_menu.add_command(label="⬇️ Download", 
                                           command=self.download_selected)
@@ -916,9 +1013,10 @@ class KM360GUI:
             return None, None
         
         item = selected[0]
-        idx = self.file_tree.index(item) + 1  # File numbers are 1-indexed
         values = self.file_tree.item(item, 'values')
-        name = values[0] if values else f"file_{idx}"
+        name = values[0] if values else "unknown"
+        # Get file number from hidden column (index 3)
+        idx = int(values[3]) if len(values) > 3 and values[3] else self.file_tree.index(item) + 1
         
         return idx, name
     
@@ -931,9 +1029,10 @@ class KM360GUI:
         
         # Find first viewable file in selection (ignore others silently)
         for item in selected:
-            idx = self.file_tree.index(item) + 1
             values = self.file_tree.item(item, 'values')
-            name = values[0] if values else f"file_{idx}"
+            name = values[0] if values else "unknown"
+            # Get file number from hidden column
+            idx = int(values[3]) if len(values) > 3 and values[3] else self.file_tree.index(item) + 1
             
             # Check if it's viewable (image or video)
             ext = name.lower().split('.')[-1] if '.' in name else ''
@@ -1108,65 +1207,6 @@ class KM360GUI:
         
         dialog.protocol("WM_DELETE_WINDOW", close_dialog)
     
-    def export_selected_for_youtube(self):
-        """Download and export selected video(s) for YouTube - ignores non-video files"""
-        selected = self.file_tree.selection()
-        if not selected:
-            messagebox.showinfo("No Selection", "Please select video files to export.")
-            return
-        
-        # Get all selected files and filter to videos only (ignore images silently)
-        video_files = []
-        for item in selected:
-            idx = self.file_tree.index(item) + 1
-            values = self.file_tree.item(item, 'values')
-            name = values[0] if values else f"file_{idx}"
-            
-            # Check if it's a video
-            ext = name.lower().split('.')[-1] if '.' in name else ''
-            if ext in ['mp4', 'mov', 'avi', 'mkv']:
-                video_files.append((idx, name))
-        
-        if not video_files:
-            messagebox.showinfo("No Videos", 
-                "No video files selected.\n\n"
-                "YouTube Export only works with video files (mp4, mov, avi).")
-            return
-        
-        # If single video, use save dialog. If multiple, ask for directory
-        if len(video_files) == 1:
-            idx, name = video_files[0]
-            ext = name.lower().split('.')[-1]
-            output_path = filedialog.asksaveasfilename(
-                title="Export for YouTube",
-                defaultextension=".mp4",
-                initialfile=name.replace(f".{ext}", "_youtube.mp4"),
-                filetypes=[("MP4 files", "*.mp4"), ("All files", "*.*")]
-            )
-            if not output_path:
-                return
-            # Process single file
-            self._process_youtube_export(video_files, [output_path])
-        else:
-            # Multiple videos - ask for output directory
-            output_dir = filedialog.askdirectory(title="Select Output Directory for YouTube Exports")
-            if not output_dir:
-                return
-            # Generate output paths
-            output_paths = []
-            for idx, name in video_files:
-                ext = name.lower().split('.')[-1]
-                output_name = name.replace(f".{ext}", "_youtube.mp4")
-                output_paths.append(os.path.join(output_dir, output_name))
-            # Process all files
-            self._process_youtube_export(video_files, output_paths)
-    
-    def _process_youtube_export(self, video_files, output_paths):
-        """Process YouTube export using DownloadProgressDialog with checksum verification"""
-        # Use the download dialog in YouTube mode - it handles everything including retries
-        DownloadProgressDialog(self.root, video_files, None, self, 
-                              youtube_mode=True, youtube_output_paths=output_paths)
-    
     def copy_filename(self):
         """Copy selected filename to clipboard"""
         idx, name = self.get_selected_file_info()
@@ -1192,8 +1232,7 @@ class KM360GUI:
         # Tab 4: 360° Viewer
         self.setup_viewer_tab()
         
-        # Tab 5: YouTube Export
-        self.setup_youtube_tab()
+
     
     def setup_quick_actions_tab(self):
         """Setup quick actions tab"""
@@ -1312,12 +1351,14 @@ class KM360GUI:
         self.info_text.insert(tk.END, "KeyMission 360 Linux Utility\n")
         self.info_text.insert(tk.END, f"Version: {VERSION}\n\n")
         self.info_text.insert(tk.END, "Features:\n")
-        self.info_text.insert(tk.END, "- File download and management\n")
+        self.info_text.insert(tk.END, "- File download with resume support\n")
+        self.info_text.insert(tk.END, "- Auto 360° metadata injection for videos (YouTube ready)\n")
+        self.info_text.insert(tk.END, "- Optional delete from camera after download\n")
         self.info_text.insert(tk.END, "- Date/time synchronization\n")
         self.info_text.insert(tk.END, "- Camera settings configuration\n")
         self.info_text.insert(tk.END, "- SD card formatting\n")
         self.info_text.insert(tk.END, "- 360° image/video viewer\n")
-        self.info_text.insert(tk.END, "- YouTube 360° metadata export\n\n")
+        self.info_text.insert(tk.END, "- USB port memory for quick reset\n\n")
         self.info_text.insert(tk.END, "Planned (v2.0):\n")
         self.info_text.insert(tk.END, "- Batch Operations\n")
         self.info_text.insert(tk.END, "- Advanced Settings panel\n")
@@ -1372,46 +1413,6 @@ class KM360GUI:
         ttk.Label(tab, text="Or run from terminal: python3 km360_viewer.py [file]",
                  foreground="gray").pack(pady=10)
     
-    def setup_youtube_tab(self):
-        """Setup YouTube export tab"""
-        tab = ttk.Frame(self.notebook)
-        self.notebook.add(tab, text="▶️ YouTube Export")
-        
-        ttk.Label(tab, text="YouTube 360° Export", font=("Arial", 16, "bold")).pack(pady=20)
-        
-        info_frame = ttk.LabelFrame(tab, text="About", padding=10)
-        info_frame.pack(fill=tk.X, padx=20, pady=10)
-        
-        ttk.Label(info_frame, text="Inject 360° spherical metadata into videos for proper YouTube playback.",
-                 wraplength=600).pack(anchor=tk.W)
-        
-        ttk.Label(info_frame, text="\nWhat this does:", font=("Arial", 10, "bold")).pack(anchor=tk.W)
-        ttk.Label(info_frame, text="• Adds Spatial Media metadata (no re-encoding)").pack(anchor=tk.W)
-        ttk.Label(info_frame, text="• YouTube recognizes the video as 360°").pack(anchor=tk.W)
-        ttk.Label(info_frame, text="• Preserves original video quality").pack(anchor=tk.W)
-        ttk.Label(info_frame, text="• Very fast (just metadata injection)").pack(anchor=tk.W)
-        
-        # File selection
-        file_frame = ttk.LabelFrame(tab, text="Export Video", padding=10)
-        file_frame.pack(fill=tk.X, padx=20, pady=10)
-        
-        self.yt_file_var = tk.StringVar()
-        ttk.Entry(file_frame, textvariable=self.yt_file_var, width=50).pack(side=tk.LEFT, padx=5)
-        ttk.Button(file_frame, text="Browse...", command=self.browse_yt_file).pack(side=tk.LEFT, padx=5)
-        
-        btn_frame = ttk.Frame(tab)
-        btn_frame.pack(pady=20)
-        
-        ttk.Button(btn_frame, text="Export for YouTube", 
-                  command=self.export_youtube).pack(pady=5)
-        
-        # Status
-        self.yt_status = ttk.Label(tab, text="", foreground="blue")
-        self.yt_status.pack(pady=10)
-        
-        ttk.Label(tab, text="Or run from terminal: python3 km360_youtube_export.py video.mp4",
-                 foreground="gray").pack(pady=10)
-    
     def launch_viewer(self):
         """Launch the 360° viewer"""
         import subprocess
@@ -1428,14 +1429,16 @@ class KM360GUI:
         
         # Get all files from tree
         files = []
-        for i, item in enumerate(self.file_tree.get_children(), 1):
+        for item in self.file_tree.get_children():
             values = self.file_tree.item(item, 'values')
             if values:
                 name = values[0]
+                # Get file number from hidden column
+                file_num = int(values[3]) if len(values) > 3 and values[3] else self.file_tree.index(item) + 1
                 # Only include images and videos
                 ext = name.lower().split('.')[-1] if '.' in name else ''
                 if ext in ['jpg', 'jpeg', 'png', 'mp4', 'mov', 'avi']:
-                    files.append(f"{i}: {name}")
+                    files.append(f"{file_num}: {name}")
         
         self.viewer_file_combo['values'] = files
         if files:
@@ -1489,9 +1492,10 @@ class KM360GUI:
     
     def browse_yt_file(self):
         """Browse for video file to export"""
-        path = filedialog.askopenfilename(
+        path = ask_open_filename(
             title="Select Video to Export",
-            filetypes=[("Videos", "*.mp4 *.mov *.avi"), ("All Files", "*.*")]
+            filetypes=[("Videos", "*.mp4 *.mov *.avi"), ("All Files", "*.*")],
+            parent=self.root
         )
         if path:
             self.yt_file_var.set(path)
@@ -1634,7 +1638,7 @@ class KM360GUI:
         self.root.after(5000, self.check_connection)
     
     def connect_camera(self):
-        """Connect to the camera"""
+        """Connect to the camera and save USB port info"""
         self.set_status("Connecting to camera...")
         
         try:
@@ -1648,6 +1652,24 @@ class KM360GUI:
                     "- Connected via USB\n- Powered on (press Photo or Video button)")
                 self.set_status("Not connected")
                 return
+            
+            # Save USB port info for faster reset
+            if USB_AVAILABLE:
+                try:
+                    import usb1
+                    with usb1.USBContext() as context:
+                        for device in context.getDeviceIterator(skip_on_error=True):
+                            if device.getVendorID() == 0x04b0:
+                                bus = device.getBusNumber()
+                                addr = device.getDeviceAddress()
+                                port_str = f"{bus:03d}:{addr:03d}"
+                                config = load_config()
+                                config['last_usb_port'] = port_str
+                                save_config(config)
+                                print(f"Saved USB port: {port_str}")
+                                break
+                except Exception as e:
+                    print(f"Could not save USB port info: {e}")
             
             # Get camera info (with retry)
             info_success = False
@@ -1733,22 +1755,93 @@ class KM360GUI:
                         size = parts[2]
                         date = ' '.join(parts[3:])
                         
-                        self.file_tree.insert('', 'end', values=(name, size, date))
+                        # Store file_num in hidden column for accurate delete/download
+                        self.file_tree.insert('', 'end', values=(name, size, date, num))
             
             self.set_status(f"Loaded {len(self.file_tree.get_children())} files")
             
         except Exception as e:
             self.set_status(f"Error reading files: {str(e)}")
     
+    def _show_download_options_dialog(self, num_files):
+        """Show download options dialog with delete checkbox"""
+        dialog = tk.Toplevel(self.root)
+        dialog.title(f"Download {num_files} File{'s' if num_files > 1 else ''}")
+        dialog.geometry("450x280")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        
+        # Center dialog
+        dialog.update_idletasks()
+        x = (dialog.winfo_screenwidth() // 2) - 225
+        y = (dialog.winfo_screenheight() // 2) - 140
+        dialog.geometry(f"+{x}+{y}")
+        
+        # Info
+        ttk.Label(dialog, text="📥 Download", 
+                 font=("Arial", 14, "bold")).pack(pady=10)
+        
+        video_note = "\n\nNote: Video files will automatically have 360° metadata injected for YouTube upload."
+        ttk.Label(dialog, text=f"Will download {num_files} file{'s' if num_files > 1 else ''} from camera.{video_note}",
+                 wraplength=400).pack(pady=5, padx=20)
+        
+        # Options frame
+        options_frame = ttk.LabelFrame(dialog, text="Options", padding=10)
+        options_frame.pack(fill=tk.X, padx=20, pady=10)
+        
+        # Delete after download checkbox
+        delete_var = tk.BooleanVar(value=get_config_value('delete_after_download', False))
+        ttk.Checkbutton(options_frame, 
+                       text="Remove from camera after successful download",
+                       variable=delete_var).pack(anchor=tk.W)
+        
+        # Info label
+        ttk.Label(options_frame, 
+                 text="⚠️ Warning: This will permanently delete files from the camera.",
+                 foreground="orange", font=("Arial", 9)).pack(anchor=tk.W, pady=(5, 0))
+        
+        # Result storage
+        result = [False]
+        
+        def on_ok():
+            # Save the delete preference
+            set_config_value('delete_after_download', delete_var.get())
+            result[0] = delete_var.get()
+            dialog.destroy()
+        
+        def on_cancel():
+            result[0] = None  # Cancelled
+            dialog.destroy()
+        
+        # Buttons
+        btn_frame = ttk.Frame(dialog)
+        btn_frame.pack(pady=15)
+        
+        ttk.Button(btn_frame, text="Download", command=on_ok).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Cancel", command=on_cancel).pack(side=tk.LEFT, padx=5)
+        
+        # Wait for dialog
+        self.root.wait_window(dialog)
+        
+        return result[0]
+
     def download_selected(self):
-        """Download selected files"""
+        """Download selected files with options dialog"""
         selected = self.file_tree.selection()
         if not selected:
             messagebox.showinfo("No Selection", "Please select files to download.")
             return
         
-        # Ask for destination
-        dest = filedialog.askdirectory(title="Select Download Destination")
+        # Show download options
+        delete_after = self._show_download_options_dialog(len(selected))
+        if delete_after is None:
+            return  # Cancelled
+        
+        # Ask for destination using native dialog
+        dest = ask_directory(
+            title="Select Download Destination",
+            parent=self.root
+        )
         if not dest:
             return
         
@@ -1757,59 +1850,70 @@ class KM360GUI:
         for item in selected:
             values = self.file_tree.item(item, 'values')
             name = values[0]
-            # Find file number from tree index
-            idx = self.file_tree.index(item) + 1
-            files_to_download.append((idx, name))
+            # Get file number from hidden column (index 3)
+            file_num = int(values[3]) if len(values) > 3 and values[3] else self.file_tree.index(item) + 1
+            files_to_download.append((file_num, name))
         
         # Start download in thread
         self.download_thread = threading.Thread(
             target=self._download_files, 
-            args=(files_to_download, dest)
+            args=(files_to_download, dest, delete_after)
         )
         self.download_thread.start()
     
     def download_all(self):
-        """Download all files"""
+        """Download all files with options dialog"""
         if not self.file_tree.get_children():
             messagebox.showinfo("No Files", "No files to download.")
             return
         
-        dest = filedialog.askdirectory(title="Select Download Destination")
+        num_files = len(self.file_tree.get_children())
+        
+        # Show download options
+        delete_after = self._show_download_options_dialog(num_files)
+        if delete_after is None:
+            return  # Cancelled
+        
+        dest = ask_directory(
+            title="Select Download Destination",
+            parent=self.root
+        )
         if not dest:
             return
         
         self.download_thread = threading.Thread(
             target=self._download_all_files,
-            args=(dest,)
+            args=(dest, delete_after)
         )
         self.download_thread.start()
     
-    def _download_files(self, files, dest):
+    def _download_files(self, files, dest, delete_after=False):
         """Download specific files with progress tracking and resume support"""
-        self.show_download_progress_dialog(files, dest)
+        self.show_download_progress_dialog(files, dest, delete_after)
     
-    def _download_all_files(self, dest):
+    def _download_all_files(self, dest, delete_after=False):
         """Download all files with progress tracking"""
         # Get all files from tree
         files = []
         for item in self.file_tree.get_children():
-            idx = self.file_tree.index(item) + 1
             values = self.file_tree.item(item, 'values')
             if values:
                 name = values[0]
+                # Get file number from hidden column
+                idx = int(values[3]) if len(values) > 3 and values[3] else self.file_tree.index(item) + 1
                 files.append((idx, name))
         
         if files:
-            self.show_download_progress_dialog(files, dest)
+            self.show_download_progress_dialog(files, dest, delete_after)
         else:
             self.root.after(0, lambda: messagebox.showinfo("No Files", "No files to download."))
     
-    def show_download_progress_dialog(self, files, dest):
+    def show_download_progress_dialog(self, files, dest, delete_after=False):
         """Show download progress dialog with queue and resume support"""
-        DownloadProgressDialog(self.root, files, dest, self)
+        DownloadProgressDialog(self.root, files, dest, self, delete_after=delete_after)
     
     def reset_usb_port(self):
-        """Reset the USB port the camera is connected to"""
+        """Reset the USB port the camera is connected to - uses remembered port if available"""
         if not USB_AVAILABLE:
             messagebox.showerror("Error", 
                 "USB libraries not available. Install pyusb and libusb1:\n"
@@ -1820,15 +1924,54 @@ class KM360GUI:
         
         def do_reset():
             try:
-                # Find the camera
                 context = usb1.USBContext()
                 camera_device = None
+                bus = None
+                addr = None
                 
-                for device in context.getDeviceIterator(skip_on_error=True):
-                    # Nikon vendor ID
-                    if device.getVendorID() == 0x04b0:
-                        camera_device = device
-                        break
+                # First, try the remembered port from config
+                config = load_config()
+                last_port = config.get('last_usb_port')
+                
+                if last_port:
+                    try:
+                        bus_str, addr_str = last_port.split(':')
+                        last_bus = int(bus_str)
+                        last_addr = int(addr_str)
+                        
+                        self.set_status(f"Checking last known port {last_port}...")
+                        
+                        # Try to find device at the last known port
+                        for device in context.getDeviceIterator(skip_on_error=True):
+                            if (device.getBusNumber() == last_bus and 
+                                device.getVendorID() == 0x04b0):
+                                # Camera found at remembered port
+                                bus = last_bus
+                                addr = device.getDeviceAddress()  # Use current address
+                                camera_device = device
+                                self.set_status(f"Camera found at remembered port {last_bus:03d}:{addr:03d}")
+                                break
+                    except (ValueError, Exception) as e:
+                        print(f"Could not parse last_usb_port: {e}")
+                
+                # If not found at remembered port, scan all devices
+                if not camera_device:
+                    self.set_status("Scanning USB bus for camera...")
+                    
+                    for device in context.getDeviceIterator(skip_on_error=True):
+                        # Nikon vendor ID
+                        if device.getVendorID() == 0x04b0:
+                            camera_device = device
+                            bus = device.getBusNumber()
+                            addr = device.getDeviceAddress()
+                            
+                            # Save this port for next time
+                            port_str = f"{bus:03d}:{addr:03d}"
+                            config['last_usb_port'] = port_str
+                            save_config(config)
+                            
+                            self.set_status(f"Found camera at bus {bus}, addr {addr} (saved for next time)")
+                            break
                 
                 if not camera_device:
                     self.root.after(0, lambda: messagebox.showinfo(
@@ -1838,12 +1981,7 @@ class KM360GUI:
                     self.set_status("Camera not found for USB reset")
                     return
                 
-                bus = camera_device.getBusNumber()
-                addr = camera_device.getDeviceAddress()
-                
-                self.set_status(f"Found camera at bus {bus}, addr {addr}")
-                
-                # Try to reset using usb.core (pyusb)
+                # Try to reset using usb.core (pyusb) - this is the most reliable method
                 try:
                     dev = usb.core.find(idVendor=0x04b0)
                     if dev:
@@ -1851,7 +1989,7 @@ class KM360GUI:
                         self.set_status("USB port reset successful")
                         self.root.after(0, lambda: messagebox.showinfo(
                             "USB Reset", 
-                            "USB port has been reset.\n\n"
+                            f"USB port reset at bus {bus}, address {addr}.\n\n"
                             "Wait a few seconds for the camera to reconnect,\n"
                             "then click 'Connect' or 'Refresh'."))
                         return
@@ -1923,17 +2061,63 @@ class KM360GUI:
                                    "This cannot be undone!"):
             return
         
-        # Delete files
+        # Get current folder from camera first
+        folder = "/"
+        try:
+            result = subprocess.run(["gphoto2", "--list-folders"],
+                                    capture_output=True, text=True, timeout=10)
+            # Parse to find the folder with files
+            for line in result.stdout.split('\n'):
+                if 'store_' in line or 'DCIM' in line:
+                    folder = line.strip()
+                    break
+        except:
+            pass
+        
+        deleted_count = 0
+        failed_files = []
+        
+        # Delete files using stored file numbers
         for item in selected:
-            idx = self.file_tree.index(item) + 1
+            values = self.file_tree.item(item, 'values')
+            # Get file number from hidden column
+            file_num = int(values[3]) if len(values) > 3 and values[3] else self.file_tree.index(item) + 1
+            name = values[0] if values else f"file_{file_num}"
+            
             try:
-                subprocess.run(["gphoto2", "--delete-file", str(idx)], 
-                             capture_output=True, timeout=30)
+                # Try without folder first (some cameras work this way)
+                result = subprocess.run(["gphoto2", "--delete-file", str(file_num)], 
+                             capture_output=True, text=True, timeout=30)
+                
+                if result.returncode != 0:
+                    # Try with folder specification
+                    result = subprocess.run(["gphoto2", "--folder", folder, "--delete-file", str(file_num)], 
+                                 capture_output=True, text=True, timeout=30)
+                    
+                    if result.returncode != 0:
+                        # Try with --recurse flag
+                        result = subprocess.run(["gphoto2", "--recurse", "--delete-file", str(file_num)], 
+                                     capture_output=True, text=True, timeout=30)
+                
+                if result.returncode == 0:
+                    deleted_count += 1
+                else:
+                    failed_files.append((name, result.stderr.strip()))
+                    print(f"Error deleting file {file_num}: {result.stderr}")
             except Exception as e:
-                print(f"Error deleting file: {e}")
+                failed_files.append((name, str(e)))
+                print(f"Error deleting file {file_num}: {e}")
         
         self.refresh_files()
-        self.set_status("Files deleted")
+        
+        if failed_files:
+            error_msg = "\n".join([f"• {name}: {err[:50]}" for name, err in failed_files[:3]])
+            if len(failed_files) > 3:
+                error_msg += f"\n... and {len(failed_files) - 3} more"
+            messagebox.showwarning("Delete Complete", 
+                f"Deleted {deleted_count} files.\nFailed: {len(failed_files)}\n\n{error_msg}")
+        else:
+            self.set_status(f"Deleted {deleted_count} files")
     
     # --- Settings Methods ---
     
@@ -2135,54 +2319,113 @@ class KM360GUI:
         """Show application settings"""
         dialog = tk.Toplevel(self.root)
         dialog.title("Application Settings")
-        dialog.geometry("400x300")
+        dialog.geometry("450x450")
         dialog.transient(self.root)
         
         ttk.Label(dialog, text="Application Settings", font=("Arial", 14, "bold")).pack(pady=10)
+        
+        # Load current config
+        config = load_config()
         
         # Download directory
         ttk.Label(dialog, text="Default Download Directory:").pack(anchor=tk.W, padx=20)
         dir_frame = ttk.Frame(dialog)
         dir_frame.pack(fill=tk.X, padx=20, pady=(0, 10))
         
-        download_dir = tk.StringVar(value=str(Path.home() / "Pictures" / "KM360"))
+        download_dir = tk.StringVar(value=config.get('last_download_dir', str(Path.home() / 'Pictures')))
         ttk.Entry(dir_frame, textvariable=download_dir).pack(side=tk.LEFT, fill=tk.X, expand=True)
         
         def browse_dir():
-            d = filedialog.askdirectory()
+            d = ask_directory(
+                title="Select Default Download Directory",
+                parent=dialog
+            )
             if d:
                 download_dir.set(d)
         
         ttk.Button(dir_frame, text="Browse...", command=browse_dir).pack(side=tk.LEFT, padx=(5, 0))
         
+        # Download options frame
+        dl_frame = ttk.LabelFrame(dialog, text="Download Options", padding=10)
+        dl_frame.pack(fill=tk.X, padx=20, pady=10)
+        
+        delete_after = tk.BooleanVar(value=config.get('delete_after_download', False))
+        ttk.Checkbutton(dl_frame, text="Default: Remove from camera after download",
+                       variable=delete_after).pack(anchor=tk.W)
+        
+        ttk.Label(dl_frame, text="(Videos automatically get 360° metadata for YouTube)",
+                 foreground="gray", font=("Arial", 9)).pack(anchor=tk.W, pady=(5, 0))
+        
         # Auto-sync time option
-        auto_sync = tk.BooleanVar(value=False)
+        auto_sync = tk.BooleanVar(value=config.get('auto_sync_time', False))
         ttk.Checkbutton(dialog, text="Auto-sync time on connect", 
                        variable=auto_sync).pack(anchor=tk.W, padx=20, pady=10)
         
-        ttk.Button(dialog, text="Save", command=dialog.destroy).pack(pady=20)
+        # USB Reset frame
+        usb_frame = ttk.LabelFrame(dialog, text="USB Port Memory", padding=10)
+        usb_frame.pack(fill=tk.X, padx=20, pady=10)
+        
+        last_usb = config.get('last_usb_port', 'Not detected yet')
+        ttk.Label(usb_frame, text=f"Last detected USB port: {last_usb}").pack(anchor=tk.W)
+        
+        ttk.Label(usb_frame, text="The USB reset button will use this port for faster reset.",
+                 foreground="gray", font=("Arial", 9), wraplength=380).pack(anchor=tk.W, pady=(5, 0))
+        
+        # File dialog preference
+        dialog_frame = ttk.LabelFrame(dialog, text="File Dialog Style", padding=10)
+        dialog_frame.pack(fill=tk.X, padx=20, pady=10)
+        
+        dialog_pref = tk.StringVar(value=config.get('preferred_file_dialog', 'auto'))
+        ttk.Radiobutton(dialog_frame, text="Auto-detect (recommended)", 
+                       variable=dialog_pref, value="auto").pack(anchor=tk.W)
+        ttk.Radiobutton(dialog_frame, text="GTK (GNOME, XFCE, etc.)", 
+                       variable=dialog_pref, value="gtk").pack(anchor=tk.W)
+        ttk.Radiobutton(dialog_frame, text="KDE (KDialog)", 
+                       variable=dialog_pref, value="kde").pack(anchor=tk.W)
+        ttk.Radiobutton(dialog_frame, text="Standard (Tkinter)", 
+                       variable=dialog_pref, value="tk").pack(anchor=tk.W)
+        
+        def save_settings():
+            config['last_download_dir'] = download_dir.get()
+            config['delete_after_download'] = delete_after.get()
+            config['auto_sync_time'] = auto_sync.get()
+            config['preferred_file_dialog'] = dialog_pref.get()
+            save_config(config)
+            dialog.destroy()
+        
+        ttk.Button(dialog, text="Save", command=save_settings).pack(pady=10)
     
     def show_download_manager(self):
         """Show download manager"""
         # Get all files from current file tree
         files = []
-        for i, item in enumerate(self.file_tree.get_children(), 1):
+        for item in self.file_tree.get_children():
             values = self.file_tree.item(item, 'values')
             if values:
                 name = values[0]
-                files.append((i, name))
+                # Get file number from hidden column
+                file_num = int(values[3]) if len(values) > 3 and values[3] else self.file_tree.index(item) + 1
+                files.append((file_num, name))
         
         if not files:
             messagebox.showinfo("No Files", "No files available. Connect to camera first.")
             return
         
-        # Ask for destination
-        dest = filedialog.askdirectory(title="Select Download Destination")
+        # Show download options
+        delete_after = self._show_download_options_dialog(len(files))
+        if delete_after is None:
+            return
+        
+        # Ask for destination using native dialog
+        dest = ask_directory(
+            title="Select Download Destination",
+            parent=self.root
+        )
         if not dest:
             return
         
         # Show download dialog
-        DownloadProgressDialog(self.root, files, dest, self)
+        DownloadProgressDialog(self.root, files, dest, self, delete_after=delete_after)
     
     def show_docs(self):
         """Show documentation"""
@@ -2203,6 +2446,102 @@ class KM360GUI:
             messagebox.showinfo("Documentation", 
                 "Documentation is available at:\n"
                 "https://github.com/Innomen/KeyMission360Tools")
+
+    def install_desktop_entry(self):
+        """Install desktop entry for the application menu"""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Add to Start Menu")
+        dialog.geometry("450x350")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        
+        # Center dialog
+        dialog.update_idletasks()
+        x = (dialog.winfo_screenwidth() // 2) - 225
+        y = (dialog.winfo_screenheight() // 2) - 175
+        dialog.geometry(f"+{x}+{y}")
+        
+        ttk.Label(dialog, text="🚀 Add to Start Menu", 
+                 font=("Arial", 16, "bold")).pack(pady=15)
+        
+        info_text = """This will add the KeyMission 360 Utility to your 
+application menu so you can launch it from:
+
+  • Activities / Application menu
+  • Desktop launchers
+  • Alt+F2 run dialog
+
+The desktop entry will be installed for the current user.
+"""
+        ttk.Label(dialog, text=info_text, justify=tk.LEFT).pack(pady=10, padx=20)
+        
+        # Status frame
+        status_frame = ttk.LabelFrame(dialog, text="Status", padding=10)
+        status_frame.pack(fill=tk.X, padx=20, pady=10)
+        
+        status_var = tk.StringVar(value="Not installed")
+        ttk.Label(status_frame, textvariable=status_var, 
+                 font=("Arial", 10)).pack(anchor=tk.W)
+        
+        # Check current status
+        from pathlib import Path
+        xdg_data_home = os.environ.get('XDG_DATA_HOME', Path.home() / '.local' / 'share')
+        desktop_file = Path(xdg_data_home) / 'applications' / 'km360-utility.desktop'
+        
+        if desktop_file.exists():
+            status_var.set(f"✓ Installed\n  {desktop_file}")
+        
+        def do_install():
+            try:
+                result = subprocess.run(
+                    ["python3", "km360_install_desktop.py"],
+                    capture_output=True, text=True, timeout=30
+                )
+                if result.returncode == 0:
+                    messagebox.showinfo("Success", 
+                        "Application added to Start Menu!\n\n"
+                        "You can now launch it from your application menu.",
+                        parent=dialog)
+                    status_var.set(f"✓ Installed\n  {desktop_file}")
+                else:
+                    messagebox.showerror("Error", 
+                        f"Installation failed:\n{result.stderr}",
+                        parent=dialog)
+            except Exception as e:
+                messagebox.showerror("Error", 
+                    f"Could not run installer:\n{str(e)}\n\n"
+                    "Make sure km360_install_desktop.py is in the same directory.",
+                    parent=dialog)
+        
+        def do_remove():
+            if not desktop_file.exists():
+                messagebox.showinfo("Not Installed", 
+                    "Desktop entry is not installed.",
+                    parent=dialog)
+                return
+            
+            if messagebox.askyesno("Confirm Remove", 
+                "Remove KeyMission 360 Utility from the Start Menu?",
+                parent=dialog):
+                try:
+                    result = subprocess.run(
+                        ["python3", "km360_install_desktop.py", "--remove"],
+                        capture_output=True, text=True, timeout=30
+                    )
+                    messagebox.showinfo("Removed", 
+                        "Desktop entry removed.",
+                        parent=dialog)
+                    status_var.set("Not installed")
+                except Exception as e:
+                    messagebox.showerror("Error", str(e), parent=dialog)
+        
+        # Buttons
+        btn_frame = ttk.Frame(dialog)
+        btn_frame.pack(pady=20)
+        
+        ttk.Button(btn_frame, text="Install", command=do_install).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Remove", command=do_remove).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Close", command=dialog.destroy).pack(side=tk.LEFT, padx=5)
     
     def show_about(self):
         """Show about dialog"""
@@ -2211,10 +2550,13 @@ class KM360GUI:
             f"Version {VERSION}\n\n"
             "A Linux replacement for the Nikon KeyMission 360/170 Utility.\n\n"
             "Features:\n"
-            "- File download and management\n"
+            "- File download with resume support\n"
+            "- Auto 360° metadata for YouTube videos\n"
+            "- Optional delete from camera\n"
             "- Date/time synchronization\n"
             "- Camera settings configuration\n"
-            "- SD card formatting\n\n"
+            "- SD card formatting\n"
+            "- USB port memory for quick reset\n\n"
             "License: MIT\n"
             "https://github.com/Innomen/KeyMission360Tools")
 
