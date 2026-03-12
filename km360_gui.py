@@ -2467,9 +2467,11 @@ class KM360GUI:
 
     def install_desktop_entry(self):
         """Install desktop entry for the application menu"""
-        dialog = tk.Toplevel(self.root)
+        # Keep reference to prevent garbage collection
+        self.install_dialog = tk.Toplevel(self.root)
+        dialog = self.install_dialog
         dialog.title("Add to Start Menu")
-        dialog.geometry("450x350")
+        dialog.geometry("500x450")
         dialog.transient(self.root)
         dialog.grab_set()
         
@@ -2562,13 +2564,13 @@ The desktop entry will be installed for the current user.
                 except Exception as e:
                     messagebox.showerror("Error", str(e), parent=dialog)
         
-        # Buttons
+        # Buttons frame - packed at bottom to ensure visibility
         btn_frame = ttk.Frame(dialog)
-        btn_frame.pack(pady=20)
+        btn_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=20, pady=15)
         
-        ttk.Button(btn_frame, text="Install", command=do_install).pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_frame, text="Remove", command=do_remove).pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_frame, text="Close", command=dialog.destroy).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="🚀 Install", command=do_install).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="🗑️ Remove", command=do_remove).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="❌ Close", command=dialog.destroy).pack(side=tk.RIGHT, padx=5)
     
     def show_about(self):
         """Show about dialog"""
