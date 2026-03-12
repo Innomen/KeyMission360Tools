@@ -682,6 +682,19 @@ This project is especially valuable for:
 
 ## Changelog
 
+### v1.8 (2026-03-12)
+- **Bug Fixes**:
+  - **Fixed download not working**: Removed undefined `youtube_mode` reference
+  - **Fixed hidden buttons**: Increased dialog sizes and added `minsize` constraints
+  - **Fixed black popup after file dialog**: Added tkinter window refresh after GTK dialogs
+  - **Fixed individual file progress bar**: Uses stdout streaming (`--stdout`) to track bytes in real-time
+  - **Fixed app not closing**: Removed `grab_set()` from dialogs, added proper `WM_DELETE_WINDOW` handlers
+  - **Fixed connection hang**: Connection attempts now run in threads with shorter timeouts
+  - **Improved partial file handling**: Firefox-style `.part` files kept in target location for resume
+  - **Real progress tracking**: Progress bar updates every 0.2s based on actual bytes received
+  - **File browser filtering**: Only shows image and video files, hides system files
+  - **Debug output**: Shows temp file location in status bar and console
+
 ### v1.7 (2026-03-11)
 - **NEW**: Configuration Module (`km360_config.py`)
   - Native GTK/KDE file dialogs with Places sidebar
@@ -747,6 +760,6 @@ This project is especially valuable for:
 
 ---
 
-*Document Version: 1.6*
-*Date: 2026-03-10*
+*Document Version: 1.8*
+*Date: 2026-03-12*
 *Authors: AI Assistant / Claude Code*

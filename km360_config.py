@@ -292,6 +292,14 @@ class GtkFileDialog(FileDialogProvider):
         while Gtk.events_pending():
             Gtk.main_iteration()
         
+        # Force tkinter parent window to refresh (fixes black window issue)
+        if self.parent:
+            try:
+                self.parent.update_idletasks()
+                self.parent.update()
+            except:
+                pass
+        
         # Save the selected directory
         if result:
             set_last_download_dir(result)
@@ -362,6 +370,14 @@ class GtkFileDialog(FileDialogProvider):
         while Gtk.events_pending():
             Gtk.main_iteration()
         
+        # Force tkinter parent window to refresh (fixes black window issue)
+        if self.parent:
+            try:
+                self.parent.update_idletasks()
+                self.parent.update()
+            except:
+                pass
+        
         if result:
             set_last_download_dir(Path(result).parent)
         
@@ -417,6 +433,14 @@ class GtkFileDialog(FileDialogProvider):
         
         while Gtk.events_pending():
             Gtk.main_iteration()
+        
+        # Force tkinter parent window to refresh (fixes black window issue)
+        if self.parent:
+            try:
+                self.parent.update_idletasks()
+                self.parent.update()
+            except:
+                pass
         
         if result:
             set_last_download_dir(Path(result).parent)

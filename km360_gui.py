@@ -118,28 +118,39 @@ class DownloadProgressDialog:
         
         # Create dialog
         self.window = tk.Toplevel(parent)
-        title = "📥 YouTube Export" if youtube_mode else "📥 Download Manager"
-        self.window.title(title)
-        self.window.geometry("650x550")
+        self.window.title("📥 Download Manager")
+        self.window.geometry("650x650")
+        self.window.minsize(600, 550)
         self.window.transient(parent)
-        self.window.grab_set()
+        # Don't use grab_set - it prevents main window from closing
         
         # Center dialog
         self.window.update_idletasks()
         x = (self.window.winfo_screenwidth() // 2) - 325
-        y = (self.window.winfo_screenheight() // 2) - 275
+        y = (self.window.winfo_screenheight() // 2) - 325
         self.window.geometry(f"+{x}+{y}")
         
         self.setup_ui()
         
+        # Handle window close button
+        self.window.protocol("WM_DELETE_WINDOW", self._on_window_close)
+        
         # Start download automatically
         self.window.after(100, self.start_download)
+    
+    def _on_window_close(self):
+        """Handle window close button - cancel download and close"""
+        if self.downloading:
+            self.cancel_download()
+            # Give a moment for cancellation to propagate
+            self.window.after(500, self.window.destroy)
+        else:
+            self.window.destroy()
     
     def setup_ui(self):
         """Setup the download dialog UI"""
         # Title
-        title = "📥 YouTube Export" if self.youtube_mode else "📥 Download Manager"
-        ttk.Label(self.window, text=title, 
+        ttk.Label(self.window, text="📥 Download Manager", 
                  font=("Arial", 14, "bold")).pack(pady=10)
         
         # Overall progress
@@ -351,28 +362,16 @@ class DownloadProgressDialog:
             return False, None, "Checksum failed"
     
     def _download_with_rsync_style_resume(self, file_num, file_name, dest_path, camera_size):
-        """Download file with rsync-style resume support"""
-        import tempfile
+        """Download file with REAL progress tracking using stdout streaming"""
+        import subprocess
+        import time
         
-        # Use a temp file during download
-        temp_dir = tempfile.gettempdir()
-        temp_path = os.path.join(temp_dir, f"km360_dl_{file_name}.partial")
+        part_path = dest_path + ".part"
+        dest_dir = os.path.dirname(dest_path)
         
-        # Check for existing partial download
-        resume_offset = 0
-        if os.path.exists(temp_path):
-            resume_offset = os.path.getsize(temp_path)
-            if camera_size and resume_offset >= camera_size:
-                # Already complete, just move it
-                os.rename(temp_path, dest_path)
-                return True, "Complete (already downloaded)"
-            self.window.after(0, lambda: self.status_var.set(f"Resuming from {format_size_bytes(resume_offset)}..."))
-        
-        # Try using gphoto2 with skip-existing or force-overwrite
-        # Unfortunately gphoto2 doesn't support byte-range resume, so we use a different approach:
-        # 1. Download to temp location
-        # 2. If download fails and partial file exists, retry up to 3 times
-        # 3. Verify checksum after download
+        # Debug info about temp file
+        self.window.after(0, lambda: self.status_var.set(f"Downloading to: {part_path}"))
+        print(f"[DEBUG] Download temp file: {part_path}")
         
         max_retries = 3
         last_error = None
@@ -382,63 +381,120 @@ class DownloadProgressDialog:
                 return False, "Cancelled"
             
             try:
-                # Remove partial file if it exists and this is a retry
-                if attempt > 0 and os.path.exists(temp_path):
-                    try:
-                        os.remove(temp_path)
-                        resume_offset = 0
-                    except:
-                        pass
+                # Open output file in binary write mode
+                out_file = open(part_path, 'wb')
+                bytes_written = 0
+                last_update_bytes = 0
+                last_update_time = time.time()
                 
-                # Download the file
-                result = subprocess.run(
-                    ["gphoto2", "--get-file", str(file_num), 
-                     f"--filename={temp_path}"],
-                    capture_output=True, timeout=300
+                # Use stdout streaming to track progress in real-time
+                process = subprocess.Popen(
+                    ["gphoto2", "--get-file", str(file_num), "--stdout"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    bufsize=8192
                 )
                 
-                if result.returncode == 0:
-                    # Download successful, move to final destination
-                    if os.path.exists(temp_path):
-                        # Verify size
-                        downloaded_size = os.path.getsize(temp_path)
-                        if camera_size and downloaded_size != camera_size:
-                            last_error = f"Size mismatch: {downloaded_size} vs {camera_size}"
-                            continue  # Retry
-                        
-                        # Move to final destination
-                        shutil.move(temp_path, dest_path)
-                        return True, "Downloaded successfully"
-                    else:
-                        last_error = "Temp file not found after download"
-                        continue
-                else:
-                    stderr = result.stderr.decode() if result.stderr else "Unknown error"
-                    last_error = f"gphoto2 error: {stderr}"
+                # Read stdout in chunks and write to file
+                chunk_size = 65536  # 64KB chunks
+                start_time = time.time()
+                
+                while True:
+                    if self.cancelled:
+                        out_file.close()
+                        process.terminate()
+                        try:
+                            process.wait(timeout=5)
+                        except:
+                            process.kill()
+                        return False, "Cancelled"
                     
-                    # Check if it's a timeout or connection error
-                    if "timeout" in stderr.lower() or "io" in stderr.lower():
-                        time.sleep(2)  # Brief pause before retry
+                    chunk = process.stdout.read(chunk_size)
+                    if not chunk:
+                        break
+                    
+                    out_file.write(chunk)
+                    out_file.flush()  # Ensure data is written to disk
+                    bytes_written += len(chunk)
+                    
+                    # Update progress every 0.2 seconds or every 256KB
+                    current_time = time.time()
+                    if current_time - last_update_time >= 0.2 or bytes_written - last_update_bytes >= 262144:
+                        if camera_size and camera_size > 0:
+                            progress = min(100, int(100 * bytes_written / camera_size))
+                            elapsed = current_time - start_time
+                            speed = bytes_written / elapsed if elapsed > 0 else 0
+                            
+                            # Format for display
+                            size_str = f"{bytes_written / 1024 / 1024:.1f} MB"
+                            total_str = f"{camera_size / 1024 / 1024:.1f} MB"
+                            speed_str = f"{speed / 1024 / 1024:.1f} MB/s"
+                            
+                            # Update UI - direct call since we're in a thread, use after for thread safety
+                            self.window.after(0, self._update_progress_ui, progress, 
+                                              f"{size_str} / {total_str}", speed_str)
+                        
+                        last_update_time = current_time
+                        last_update_bytes = bytes_written
+                
+                out_file.close()
+                
+                # Wait for process to complete
+                try:
+                    stderr = process.stderr.read()
+                    process.wait(timeout=30)
+                except:
+                    process.kill()
+                    raise Exception("Process wait timeout")
+                
+                if process.returncode == 0:
+                    # Verify size
+                    if camera_size and bytes_written != camera_size:
+                        last_error = f"Size mismatch: {bytes_written} vs {camera_size}"
+                        os.remove(part_path)
+                        continue
+                    
+                    # Rename .part to final name
+                    print(f"[DEBUG] Download complete, renaming {part_path} -> {dest_path}")
+                    os.rename(part_path, dest_path)
+                    return True, "Downloaded successfully"
+                else:
+                    stderr_str = stderr.decode() if stderr else "Unknown error"
+                    last_error = f"gphoto2 error: {stderr_str}"
+                    
+                    # Clean up partial file on error
+                    if os.path.exists(part_path):
+                        os.remove(part_path)
+                    
+                    if "timeout" in stderr_str.lower() or "io" in stderr_str.lower():
+                        time.sleep(2)
                         continue
                     else:
                         return False, last_error
                         
-            except subprocess.TimeoutExpired:
-                last_error = "Download timeout"
-                continue
             except Exception as e:
                 last_error = f"Exception: {str(e)}"
+                # Clean up partial file on exception
+                if os.path.exists(part_path):
+                    try:
+                        os.remove(part_path)
+                    except:
+                        pass
                 continue
         
-        # All retries failed
-        # Clean up partial file
-        if os.path.exists(temp_path):
-            try:
-                os.remove(temp_path)
-            except:
-                pass
-        
         return False, f"Failed after {max_retries} attempts: {last_error}"
+    
+    def _update_progress_ui(self, progress, size_str, speed_str):
+        """Update the progress bar and status labels - called from main thread via after()"""
+        try:
+            # Update the DoubleVar which is bound to the progressbar
+            self.current_progress_var.set(float(progress))
+            self.current_size_var.set(f"Progress: {size_str}")
+            self.speed_var.set(f"Speed: {speed_str}")
+            # Force immediate UI update
+            self.current_bar.update()
+        except Exception as e:
+            print(f"[DEBUG] Progress update error: {e}")  # Debug output
     
     def _is_video_file(self, filename):
         """Check if file is a video based on extension"""
@@ -502,6 +558,9 @@ class DownloadProgressDialog:
             success, message = self._download_with_rsync_style_resume(
                 file_num, file_name, dest_path, camera_size
             )
+            
+            # Set progress to 100% when download completes (success or fail)
+            self.window.after(0, lambda: self.current_progress_var.set(100))
             
             if success:
                 # Verify the downloaded file
@@ -709,8 +768,7 @@ class DownloadProgressDialog:
                 eta_str = f"{int(eta_seconds/3600)}h {int((eta_seconds%3600)/60)}m"
             self.eta_var.set(f"ETA: {eta_str}")
         
-        mode_str = "Exported" if self.youtube_mode else "Downloaded"
-        self.status_var.set(f"{mode_str} {completed} of {total} files")
+        self.status_var.set(f"Downloaded {completed} of {total} files")
     
     def _download_complete(self):
         """Called when download is complete"""
@@ -773,14 +831,39 @@ class KM360GUI:
         self.camera_info = {}
         self.current_files = []
         self.download_thread = None
+        self.connection_thread = None
+        self.cancelled = False  # For thread cancellation
         
         # Setup UI
         self.setup_menu()
         self.setup_main_layout()
         self.setup_status_bar()
         
+        # Handle window close properly
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+        
         # Try auto-connect (with delay to let camera stabilize)
         self.root.after(2000, self.check_connection)
+    
+    def on_close(self):
+        """Handle application close - cancel all operations and cleanup"""
+        self.cancelled = True
+        self.set_status("Closing application...")
+        
+        # Cancel any ongoing downloads
+        if hasattr(self, 'download_thread') and self.download_thread and self.download_thread.is_alive():
+            self.set_status("Waiting for download to cancel...")
+            # Downloads check self.cancelled flag
+            self.root.after(500, self._finish_close)
+        else:
+            self._finish_close()
+    
+    def _finish_close(self):
+        """Complete the close operation"""
+        # Stop the auto-check timer
+        self.cancelled = True
+        # Destroy the window
+        self.root.destroy()
     
     def setup_menu(self):
         """Setup application menu bar"""
@@ -1086,7 +1169,7 @@ class KM360GUI:
         dialog.title("Download Required")
         dialog.geometry("450x250")
         dialog.transient(self.root)
-        dialog.grab_set()
+        # Don't use grab_set - prevents main window close
         
         # Center dialog
         dialog.update_idletasks()
@@ -1629,80 +1712,114 @@ class KM360GUI:
     # --- Connection Methods ---
     
     def check_connection(self):
-        """Check if camera is connected"""
-        try:
-            result = subprocess.run(["gphoto2", "--auto-detect"], 
-                                  capture_output=True, text=True, timeout=15)
-            if "KeyMission 360" in result.stdout:
-                if not self.connected:
-                    self.connect_camera()
-            else:
-                if self.connected:
-                    self.disconnect_camera()
-        except:
-            pass
+        """Check if camera is connected - non-blocking with short timeout"""
+        def do_check():
+            try:
+                # Use a short timeout to prevent hanging
+                result = subprocess.run(["gphoto2", "--auto-detect"], 
+                                      capture_output=True, text=True, timeout=5)
+                if "KeyMission 360" in result.stdout:
+                    if not self.connected:
+                        # Schedule connect on main thread
+                        self.root.after(0, self.connect_camera)
+                else:
+                    if self.connected:
+                        # Schedule disconnect on main thread
+                        self.root.after(0, self.disconnect_camera)
+            except subprocess.TimeoutExpired:
+                # Camera is not responding - might need USB reset
+                self.root.after(0, lambda: self.set_status("Camera not responding - try USB Reset"))
+            except Exception as e:
+                pass
+        
+        # Run check in thread to avoid blocking UI
+        threading.Thread(target=do_check, daemon=True).start()
         
         # Schedule next check
         self.root.after(5000, self.check_connection)
     
     def connect_camera(self):
-        """Connect to the camera and save USB port info"""
+        """Connect to the camera and save USB port info - runs in thread to avoid blocking"""
         self.set_status("Connecting to camera...")
         
-        try:
-            # Check if camera is present
-            result = subprocess.run(["gphoto2", "--auto-detect"], 
-                                  capture_output=True, text=True, timeout=30)
-            
-            if "KeyMission 360" not in result.stdout:
-                messagebox.showerror("Connection Failed", 
-                    "KeyMission 360 not found.\n\nMake sure the camera is:\n"
-                    "- Connected via USB\n- Powered on (press Photo or Video button)")
-                self.set_status("Not connected")
-                return
-            
-            # Save USB port info for faster reset
-            if USB_AVAILABLE:
-                try:
-                    import usb1
-                    with usb1.USBContext() as context:
-                        for device in context.getDeviceIterator(skip_on_error=True):
-                            if device.getVendorID() == 0x04b0:
-                                bus = device.getBusNumber()
-                                addr = device.getDeviceAddress()
-                                port_str = f"{bus:03d}:{addr:03d}"
-                                config = load_config()
-                                config['last_usb_port'] = port_str
-                                save_config(config)
-                                print(f"Saved USB port: {port_str}")
-                                break
-                except Exception as e:
-                    print(f"Could not save USB port info: {e}")
-            
-            # Get camera info (with retry)
-            info_success = False
-            for attempt in range(3):
-                try:
-                    self.update_camera_info()
-                    info_success = True
-                    break
-                except Exception as e:
-                    if attempt < 2:
-                        self.set_status(f"Camera slow to respond, retrying... ({attempt+1}/3)")
-                        time.sleep(1)
-                    else:
-                        print(f"Warning: Could not get camera info: {e}")
-            
-            self.connected = True
-            self.status_label.config(text="● Connected", foreground="green")
-            self.set_status("Connected to KeyMission 360")
-            
-            # Load files
-            self.refresh_files()
-            
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to connect: {str(e)}")
-            self.set_status("Connection error")
+        def do_connect():
+            try:
+                # Check if camera is present (short timeout)
+                result = subprocess.run(["gphoto2", "--auto-detect"], 
+                                      capture_output=True, text=True, timeout=10)
+                
+                if "KeyMission 360" not in result.stdout:
+                    self.root.after(0, lambda: (
+                        messagebox.showerror("Connection Failed", 
+                            "KeyMission 360 not found.\n\nMake sure the camera is:\n"
+                            "- Connected via USB\n- Powered on (press Photo or Video button)\n\n"
+                            "If the camera is connected but not responding,\n"
+                            "try clicking '🔄 Reset USB' button."),
+                        self.set_status("Not connected - try USB Reset")
+                    ))
+                    return
+                
+                # Save USB port info for faster reset
+                if USB_AVAILABLE:
+                    try:
+                        import usb1
+                        with usb1.USBContext() as context:
+                            for device in context.getDeviceIterator(skip_on_error=True):
+                                if device.getVendorID() == 0x04b0:
+                                    bus = device.getBusNumber()
+                                    addr = device.getDeviceAddress()
+                                    port_str = f"{bus:03d}:{addr:03d}"
+                                    config = load_config()
+                                    config['last_usb_port'] = port_str
+                                    save_config(config)
+                                    print(f"Saved USB port: {port_str}")
+                                    break
+                    except Exception as e:
+                        print(f"Could not save USB port info: {e}")
+                
+                # Get camera info (with retry and short timeout)
+                info_success = False
+                for attempt in range(3):
+                    if self.cancelled:
+                        return
+                    try:
+                        self.root.after(0, self.update_camera_info)
+                        info_success = True
+                        break
+                    except Exception as e:
+                        if attempt < 2:
+                            self.root.after(0, lambda a=attempt: 
+                                self.set_status(f"Camera slow to respond, retrying... ({a+1}/3)"))
+                            time.sleep(1)
+                        else:
+                            print(f"Warning: Could not get camera info: {e}")
+                
+                self.connected = True
+                self.root.after(0, lambda: (
+                    self.status_label.config(text="● Connected", foreground="green"),
+                    self.set_status("Connected to KeyMission 360"),
+                    self.refresh_files()
+                ))
+                
+            except subprocess.TimeoutExpired:
+                self.root.after(0, lambda: (
+                    messagebox.showwarning("Connection Timeout", 
+                        "Camera is not responding.\n\n"
+                        "The camera may be stuck. Try:\n"
+                        "1. Click '🔄 Reset USB' button\n"
+                        "2. Unplug and replug the USB cable\n"
+                        "3. Power cycle the camera"),
+                    self.set_status("Connection timeout - try USB Reset")
+                ))
+            except Exception as e:
+                self.root.after(0, lambda: (
+                    messagebox.showerror("Error", f"Failed to connect: {str(e)}"),
+                    self.set_status("Connection error")
+                ))
+        
+        # Run connection in thread to avoid blocking UI
+        self.connection_thread = threading.Thread(target=do_connect, daemon=True)
+        self.connection_thread.start()
     
     def disconnect_camera(self):
         """Disconnect from camera"""
@@ -1739,7 +1856,7 @@ class KM360GUI:
     # --- File Operations ---
     
     def refresh_files(self):
-        """Refresh file list from camera"""
+        """Refresh file list from camera - filter to images and videos only"""
         if not self.connected:
             messagebox.showwarning("Not Connected", "Please connect to camera first.")
             return
@@ -1747,11 +1864,18 @@ class KM360GUI:
         self.set_status("Reading file list...")
         self.file_tree.delete(*self.file_tree.get_children())
         
+        # Supported image and video extensions
+        image_exts = {'.jpg', '.jpeg', '.png', '.tif', '.tiff', '.bmp', '.gif'}
+        video_exts = {'.mp4', '.mov', '.avi', '.mkv', '.m4v', '.3gp', '.mts'}
+        
         try:
             result = subprocess.run(["gphoto2", "--list-files"], 
                                   capture_output=True, text=True, timeout=30)
             
             lines = result.stdout.split('\n')
+            files_added = 0
+            files_filtered = 0
+            
             for line in lines:
                 # Parse gphoto2 list-files output
                 # Format: #<num> <name> <size> <date>
@@ -1763,10 +1887,19 @@ class KM360GUI:
                         size = parts[2]
                         date = ' '.join(parts[3:])
                         
-                        # Store file_num in hidden column for accurate delete/download
-                        self.file_tree.insert('', 'end', values=(name, size, date, num))
+                        # Check if it's an image or video file
+                        ext = os.path.splitext(name)[1].lower()
+                        if ext in image_exts or ext in video_exts:
+                            # Store file_num in hidden column for accurate delete/download
+                            self.file_tree.insert('', 'end', values=(name, size, date, num))
+                            files_added += 1
+                        else:
+                            files_filtered += 1
             
-            self.set_status(f"Loaded {len(self.file_tree.get_children())} files")
+            status_msg = f"Loaded {files_added} media files"
+            if files_filtered > 0:
+                status_msg += f" ({files_filtered} hidden)"
+            self.set_status(status_msg)
             
         except Exception as e:
             self.set_status(f"Error reading files: {str(e)}")
@@ -1775,14 +1908,15 @@ class KM360GUI:
         """Show download options dialog with delete checkbox"""
         dialog = tk.Toplevel(self.root)
         dialog.title(f"Download {num_files} File{'s' if num_files > 1 else ''}")
-        dialog.geometry("450x280")
+        dialog.geometry("450x320")
+        dialog.minsize(400, 280)
         dialog.transient(self.root)
-        dialog.grab_set()
+        # Don't use grab_set - prevents main window close
         
         # Center dialog
         dialog.update_idletasks()
         x = (dialog.winfo_screenwidth() // 2) - 225
-        y = (dialog.winfo_screenheight() // 2) - 140
+        y = (dialog.winfo_screenheight() // 2) - 160
         dialog.geometry(f"+{x}+{y}")
         
         # Info
@@ -1821,12 +1955,19 @@ class KM360GUI:
             result[0] = None  # Cancelled
             dialog.destroy()
         
-        # Buttons
+        def on_close():
+            result[0] = None  # Treat window close as cancel
+            dialog.destroy()
+        
+        # Buttons - pack at bottom to ensure visibility
         btn_frame = ttk.Frame(dialog)
-        btn_frame.pack(pady=15)
+        btn_frame.pack(side=tk.BOTTOM, pady=15)
         
         ttk.Button(btn_frame, text="Download", command=on_ok).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="Cancel", command=on_cancel).pack(side=tk.LEFT, padx=5)
+        
+        # Handle window close button
+        dialog.protocol("WM_DELETE_WINDOW", on_close)
         
         # Wait for dialog
         self.root.wait_window(dialog)
@@ -2329,8 +2470,11 @@ class KM360GUI:
         self.settings_dialog = tk.Toplevel(self.root)
         dialog = self.settings_dialog
         dialog.title("Application Settings")
-        dialog.geometry("450x450")
+        dialog.geometry("500x550")
+        dialog.minsize(450, 500)
         dialog.transient(self.root)
+        
+        # Don't use grab_set - it prevents window manager from closing the window properly
         
         ttk.Label(dialog, text="Application Settings", font=("Arial", 14, "bold")).pack(pady=10)
         
@@ -2434,8 +2578,8 @@ class KM360GUI:
         if not dest:
             return
         
-        # Show download dialog
-        DownloadProgressDialog(self.root, files, dest, self, delete_after=delete_after)
+        # Show download dialog (don't use grab_set so main window can still be closed)
+        dialog = DownloadProgressDialog(self.root, files, dest, self, delete_after=delete_after)
     
     def show_docs(self):
         """Show documentation"""
@@ -2473,12 +2617,12 @@ class KM360GUI:
         dialog.title("Add to Start Menu")
         dialog.geometry("500x450")
         dialog.transient(self.root)
-        dialog.grab_set()
+        # Don't use grab_set - prevents main window close
         
         # Center dialog
         dialog.update_idletasks()
-        x = (dialog.winfo_screenwidth() // 2) - 225
-        y = (dialog.winfo_screenheight() // 2) - 175
+        x = (dialog.winfo_screenwidth() // 2) - 250
+        y = (dialog.winfo_screenheight() // 2) - 225
         dialog.geometry(f"+{x}+{y}")
         
         ttk.Label(dialog, text="🚀 Add to Start Menu", 
@@ -2659,7 +2803,13 @@ def main():
         pass
     
     app = KM360GUI(root)
-    root.mainloop()
+    
+    try:
+        root.mainloop()
+    except KeyboardInterrupt:
+        # Handle Ctrl+C gracefully
+        print("\nReceived interrupt, closing application...")
+        app.on_close()
 
 
 if __name__ == "__main__":
