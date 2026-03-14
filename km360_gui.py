@@ -32,6 +32,39 @@ import hashlib
 import tempfile
 from datetime import datetime
 from pathlib import Path
+import logging
+from logging.handlers import RotatingFileHandler
+
+# Setup rolling error log
+LOG_DIR = Path.home() / '.config' / 'km360'
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+LOG_FILE = LOG_DIR / 'km360_gui.log'
+
+# Configure rotating file handler (max 1MB, keep 3 backups)
+log_handler = RotatingFileHandler(
+    LOG_FILE, maxBytes=1024*1024, backupCount=3
+)
+log_handler.setLevel(logging.DEBUG)
+log_formatter = logging.Formatter(
+    '%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+log_handler.setFormatter(log_formatter)
+
+# Setup logger
+logger = logging.getLogger('km360_gui')
+logger.setLevel(logging.DEBUG)
+logger.addHandler(log_handler)
+
+# Also log to stderr for debugging
+console_handler = logging.StreamHandler(sys.stderr)
+console_handler.setLevel(logging.WARNING)
+console_handler.setFormatter(log_formatter)
+logger.addHandler(console_handler)
+
+logger.info("=" * 50)
+logger.info("KeyMission 360 GUI Starting")
+logger.info("=" * 50)
 
 # Import our config and native dialogs
 from km360_config import (
@@ -42,11 +75,18 @@ from km360_config import (
 # USB imports for port cycling
 try:
     import usb1
+    USB1_AVAILABLE = True
+except ImportError:
+    USB1_AVAILABLE = False
+
+try:
     import usb.core
     import usb.util
-    USB_AVAILABLE = True
+    PYUSB_AVAILABLE = True
 except ImportError:
-    USB_AVAILABLE = False
+    PYUSB_AVAILABLE = False
+
+USB_AVAILABLE = USB1_AVAILABLE or PYUSB_AVAILABLE
 
 # Version info
 VERSION = "1.0"
@@ -97,6 +137,99 @@ class PlaceholderDialog:
         
         # Close button
         ttk.Button(self.window, text="OK", command=self.window.destroy).pack(pady=10)
+
+
+class CopyableResultsDialog:
+    """Dialog showing results in a copyable scrolled text widget"""
+    def __init__(self, parent, title, results, summary=None):
+        """
+        Args:
+            parent: Parent window
+            title: Dialog title
+            results: List of (name, status, details) tuples or (name, status) tuples
+            summary: Optional summary text to show at top
+        """
+        self.window = tk.Toplevel(parent)
+        self.window.title(title)
+        self.window.geometry("700x500")
+        self.window.minsize(500, 300)
+        self.window.transient(parent)
+        self.window.grab_set()
+        
+        # Center the dialog
+        self.window.update_idletasks()
+        x = (self.window.winfo_screenwidth() // 2) - 350
+        y = (self.window.winfo_screenheight() // 2) - 250
+        self.window.geometry(f"+{x}+{y}")
+        
+        self.results = results
+        self.setup_ui(summary)
+    
+    def setup_ui(self, summary):
+        """Setup the dialog UI"""
+        # Summary label
+        if summary:
+            summary_label = ttk.Label(self.window, text=summary, 
+                                     font=("Arial", 10, "bold"),
+                                     foreground="blue")
+            summary_label.pack(pady=(10, 5), padx=10)
+        
+        # Results frame
+        frame = ttk.LabelFrame(self.window, text="Results (select and copy)", padding=5)
+        frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        
+        # Scrolled text widget for copyable results
+        self.text_widget = scrolledtext.ScrolledText(
+            frame, wrap=tk.WORD, height=15, font=("Consolas", 10)
+        )
+        self.text_widget.pack(fill=tk.BOTH, expand=True)
+        
+        # Build the text content
+        content_lines = []
+        for item in self.results:
+            if len(item) >= 3:
+                name, status, details = item[0], item[1], item[2]
+                content_lines.append(f"{name}")
+                content_lines.append(f"  Status: {status}")
+                if details:
+                    content_lines.append(f"  Details: {details}")
+                content_lines.append("")
+            else:
+                name, status = item[0], item[1]
+                content_lines.append(f"{name}: {status}")
+        
+        content = "\n".join(content_lines)
+        self.text_widget.insert(tk.END, content)
+        self.text_widget.configure(state=tk.NORMAL)  # Allow selection
+        
+        # Button frame
+        btn_frame = ttk.Frame(self.window)
+        btn_frame.pack(fill=tk.X, padx=10, pady=10)
+        
+        ttk.Button(btn_frame, text="Copy All to Clipboard", 
+                  command=self.copy_to_clipboard).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(btn_frame, text="Copy Selected", 
+                  command=self.copy_selected).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(btn_frame, text="Close", 
+                  command=self.window.destroy).pack(side=tk.RIGHT)
+    
+    def copy_to_clipboard(self):
+        """Copy all text to clipboard"""
+        content = self.text_widget.get("1.0", tk.END)
+        self.window.clipboard_clear()
+        self.window.clipboard_append(content)
+        self.window.update()  # Required for clipboard to work
+    
+    def copy_selected(self):
+        """Copy selected text to clipboard"""
+        try:
+            selected = self.text_widget.selection_get()
+            self.window.clipboard_clear()
+            self.window.clipboard_append(selected)
+            self.window.update()
+        except tk.TclError:
+            # No selection
+            pass
 
 
 class DownloadProgressDialog:
@@ -910,6 +1043,7 @@ class KM360GUI:
         help_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Help", menu=help_menu)
         help_menu.add_command(label="Documentation", command=self.show_docs)
+        help_menu.add_command(label="View Log File...", command=self.view_log_file)
         help_menu.add_separator()
         help_menu.add_command(label="Add to Start Menu...", command=self.install_desktop_entry)
         help_menu.add_separator()
@@ -1315,6 +1449,9 @@ class KM360GUI:
         # Tab 4: 360° Viewer
         self.setup_viewer_tab()
         
+        # Tab 5: YouTube 360° Export (for existing videos)
+        self.setup_youtube_tab()
+        
 
     
     def setup_quick_actions_tab(self):
@@ -1504,6 +1641,192 @@ class KM360GUI:
         ttk.Label(tab, text="Or run from terminal: python3 km360_viewer.py [file]",
                  foreground="gray").pack(pady=10)
     
+    def setup_youtube_tab(self):
+        """Setup YouTube 360° export tab for existing videos"""
+        tab = ttk.Frame(self.notebook)
+        self.notebook.add(tab, text="📺 YouTube 360°")
+        
+        ttk.Label(tab, text="YouTube 360° Metadata Tool", font=("Arial", 16, "bold")).pack(pady=20)
+        
+        info_frame = ttk.LabelFrame(tab, text="About", padding=10)
+        info_frame.pack(fill=tk.X, padx=20, pady=10)
+        
+        ttk.Label(info_frame, text="Add 360° spherical metadata to existing videos for YouTube upload.",
+                 wraplength=600).pack(anchor=tk.W)
+        ttk.Label(info_frame, text="This does NOT re-encode the video - it's fast and preserves quality.",
+                 wraplength=600, foreground="green").pack(anchor=tk.W, pady=(5, 0))
+        
+        # File selection frame (now supports multiple files)
+        file_frame = ttk.LabelFrame(tab, text="Select Video Files", padding=10)
+        file_frame.pack(fill=tk.X, padx=20, pady=10)
+        
+        # Listbox for selected files with scrollbar
+        list_frame = ttk.Frame(file_frame)
+        list_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 5))
+        
+        self.yt_files_listbox = tk.Listbox(list_frame, height=6, selectmode=tk.EXTENDED)
+        scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=self.yt_files_listbox.yview)
+        self.yt_files_listbox.configure(yscrollcommand=scrollbar.set)
+        
+        self.yt_files_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Buttons for file management
+        btn_frame = ttk.Frame(file_frame)
+        btn_frame.pack(fill=tk.X, pady=5)
+        
+        ttk.Button(btn_frame, text="Add Files...", command=self.browse_yt_files).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(btn_frame, text="Add Folder...", command=self.browse_yt_add_folder).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(btn_frame, text="Remove Selected", command=self.remove_yt_files).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(btn_frame, text="Clear All", command=self.clear_yt_files).pack(side=tk.LEFT)
+        
+        # Export buttons
+        export_frame = ttk.Frame(tab)
+        export_frame.pack(pady=10)
+        
+        ttk.Button(export_frame, text="📺 Add 360° Metadata to Selected", 
+                  command=self.export_youtube_selected, width=35).pack(pady=5)
+        
+        # Batch processing frame (folder-based)
+        batch_frame = ttk.LabelFrame(tab, text="Batch Process Entire Folder", padding=10)
+        batch_frame.pack(fill=tk.X, padx=20, pady=10)
+        
+        ttk.Label(batch_frame, text="Process ALL videos in a folder (recursive):").pack(anchor=tk.W)
+        
+        batch_btn_frame = ttk.Frame(batch_frame)
+        batch_btn_frame.pack(fill=tk.X, pady=5)
+        
+        self.yt_batch_var = tk.StringVar()
+        batch_entry = ttk.Entry(batch_btn_frame, textvariable=self.yt_batch_var, width=50)
+        batch_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
+        
+        ttk.Button(batch_btn_frame, text="Browse Folder...", 
+                  command=self.browse_yt_batch_folder).pack(side=tk.RIGHT)
+        
+        ttk.Button(batch_frame, text="Process All Videos in Folder", 
+                  command=self.export_youtube_batch).pack(pady=5)
+        
+        # Status label
+        self.yt_status = ttk.Label(tab, text="Ready", foreground="gray")
+        self.yt_status.pack(pady=10)
+        
+        # Help text
+        help_frame = ttk.LabelFrame(tab, text="How it works", padding=10)
+        help_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
+        
+        help_text = """Instructions:
+
+1. Add video files using "Add Files..." or "Add Folder..."
+2. Click 'Add 360° Metadata to Selected' to process all files
+3. Processed files are saved as: filename_youtube.mp4 in the same folder
+4. Upload the exported files to YouTube - they'll be recognized as 360° videos
+
+Tips:
+• You can select multiple files at once in the file dialog (Ctrl+Click or Shift+Click)
+• Files that already have 360° metadata will be skipped automatically
+• Original files are never modified - new files are created with _youtube suffix
+
+Note: This tool is for EXISTING videos. For new downloads from the camera,
+360° metadata is automatically added during download.
+
+Requirements:
+• ffmpeg must be installed (sudo apt install ffmpeg)
+"""
+        help_text_widget = scrolledtext.ScrolledText(help_frame, wrap=tk.WORD, height=12)
+        help_text_widget.pack(fill=tk.BOTH, expand=True)
+        help_text_widget.insert(tk.END, help_text)
+        help_text_widget.configure(state=tk.DISABLED)
+    
+    def browse_yt_batch_folder(self):
+        """Browse for folder containing videos to batch process"""
+        path = ask_directory(
+            title="Select Folder with Videos",
+            parent=self.root
+        )
+        if path:
+            self.yt_batch_var.set(path)
+    
+    def export_youtube_batch(self):
+        """Batch process all videos in a folder"""
+        folder_path = self.yt_batch_var.get()
+        if not folder_path:
+            messagebox.showwarning("No Folder", "Please select a folder.")
+            return
+        
+        if not os.path.isdir(folder_path):
+            messagebox.showerror("Error", "Folder not found.")
+            return
+        
+        self.yt_status.config(text="Processing folder...", foreground="blue")
+        self.root.update()
+        
+        def do_batch():
+            try:
+                result = subprocess.run(
+                    ["python3", "km360_youtube_export.py", "--batch", folder_path],
+                    capture_output=True, text=True, timeout=300
+                )
+                
+                self.root.after(0, lambda: self._batch_complete(result))
+            except Exception as e:
+                self.root.after(0, lambda: self.yt_status.config(
+                    text=f"✗ Batch failed: {str(e)[:50]}", foreground="red"))
+        
+        threading.Thread(target=do_batch).start()
+    
+    def _batch_complete(self, result):
+        """Called when batch folder processing completes - shows copyable results"""
+        stdout = result.stdout or ""
+        stderr = result.stderr or ""
+        
+        # Parse the output to build results list
+        results = []
+        tagged = 0
+        already_tagged = 0
+        failed = 0
+        
+        if result.returncode == 0:
+            # Parse output lines for individual file results
+            for line in stdout.split('\n'):
+                line = line.strip()
+                if not line:
+                    continue
+                    
+                if 'Processing:' in line:
+                    # Extract filename
+                    filename = line.replace('Processing:', '').strip()
+                    current_file = os.path.basename(filename)
+                elif '✓ Success' in line or ('tagged' in line.lower() and 'already' not in line.lower()):
+                    tagged += 1
+                    results.append((current_file if 'current_file' in dir() else "Unknown", "Tagged", ""))
+                elif '⏭' in line or 'already' in line.lower():
+                    already_tagged += 1
+                    results.append((current_file if 'current_file' in dir() else "Unknown", "Already tagged", ""))
+                elif '✗ Failed' in line or 'failed' in line.lower():
+                    failed += 1
+                    error_detail = line
+                    results.append((current_file if 'current_file' in dir() else "Unknown", "Failed", error_detail))
+            
+            if already_tagged > 0 and tagged == 0 and failed == 0:
+                status_text = f"✓ All {already_tagged} file(s) already tagged"
+            else:
+                status_text = f"✓ Done: {tagged} tagged, {already_tagged} already had tags"
+                if failed > 0:
+                    status_text += f", {failed} failed"
+            
+            self.yt_status.config(text=status_text, foreground="green" if failed == 0 else "orange")
+            
+            # Show copyable results dialog
+            summary = f"Folder processing complete: ✓ {tagged} tagged, ⏭ {already_tagged} already tagged, ✗ {failed} failed"
+            title = "Batch Complete" if failed == 0 else "Batch Complete (with errors)"
+            CopyableResultsDialog(self.root, title, results, summary)
+        else:
+            # Batch failed completely - show full stderr
+            self.yt_status.config(text="✗ Batch failed", foreground="red")
+            error_results = [("Batch Error", "Failed", stderr or "Unknown error")]
+            CopyableResultsDialog(self.root, "Batch Failed", error_results, 
+                                "Batch processing failed with errors:")
+    
     def launch_viewer(self):
         """Launch the 360° viewer"""
         import subprocess
@@ -1581,48 +1904,165 @@ class KM360GUI:
         
         threading.Thread(target=download_and_view).start()
     
-    def browse_yt_file(self):
-        """Browse for video file to export"""
-        path = ask_open_filename(
-            title="Select Video to Export",
-            filetypes=[("Videos", "*.mp4 *.mov *.avi"), ("All Files", "*.*")],
+    def browse_yt_files(self):
+        """Browse for multiple video files to export - only shows video files"""
+        paths = ask_open_filename(
+            title="Select Video Files",
+            filetypes=[
+                ("Video Files", "*.mp4 *.mov *.avi *.mkv *.m4v *.3gp"),
+                ("MP4 Files", "*.mp4"),
+                ("MOV Files", "*.mov"),
+                ("AVI Files", "*.avi"),
+                ("All Files", "*.*")
+            ],
+            parent=self.root,
+            multiple=True
+        )
+        if paths:
+            if isinstance(paths, str):
+                # Single file returned as string
+                paths = [paths]
+            for path in paths:
+                # Avoid duplicates
+                if path not in self.yt_files_listbox.get(0, tk.END):
+                    self.yt_files_listbox.insert(tk.END, path)
+            count = self.yt_files_listbox.size()
+            self.yt_status.config(text=f"{count} file(s) selected", foreground="blue")
+    
+    def browse_yt_add_folder(self):
+        """Add all video files from a folder"""
+        folder = ask_directory(
+            title="Select Folder with Videos",
             parent=self.root
         )
-        if path:
-            self.yt_file_var.set(path)
+        if not folder:
+            return
+        
+        video_exts = {'.mp4', '.mov', '.avi', '.mkv', '.m4v', '.3gp'}
+        added = 0
+        
+        try:
+            for filename in os.listdir(folder):
+                ext = os.path.splitext(filename)[1].lower()
+                if ext in video_exts:
+                    full_path = os.path.join(folder, filename)
+                    # Avoid duplicates
+                    if full_path not in self.yt_files_listbox.get(0, tk.END):
+                        self.yt_files_listbox.insert(tk.END, full_path)
+                        added += 1
+            
+            count = self.yt_files_listbox.size()
+            self.yt_status.config(text=f"Added {added} videos ({count} total)", foreground="blue")
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not read folder: {e}")
     
-    def export_youtube(self):
-        """Export video for YouTube"""
-        file_path = self.yt_file_var.get()
-        if not file_path:
-            messagebox.showwarning("No File", "Please select a video file.")
+    def remove_yt_files(self):
+        """Remove selected files from the list"""
+        selection = self.yt_files_listbox.curselection()
+        for index in reversed(selection):
+            self.yt_files_listbox.delete(index)
+        count = self.yt_files_listbox.size()
+        self.yt_status.config(text=f"{count} file(s) selected", foreground="blue")
+    
+    def clear_yt_files(self):
+        """Clear all files from the list"""
+        self.yt_files_listbox.delete(0, tk.END)
+        self.yt_status.config(text="Ready", foreground="gray")
+    
+    def export_youtube_selected(self):
+        """Export selected files from listbox for YouTube"""
+        files = list(self.yt_files_listbox.get(0, tk.END))
+        if not files:
+            messagebox.showwarning("No Files", "Please add video files to process.")
             return
         
-        if not os.path.exists(file_path):
-            messagebox.showerror("Error", "File not found.")
-            return
+        logger.info(f"Starting batch YouTube export for {len(files)} files")
+        for f in files:
+            logger.info(f"  - {f}")
         
-        self.yt_status.config(text="Exporting...", foreground="blue")
+        self.yt_status.config(text=f"Processing {len(files)} file(s)...", foreground="blue")
         self.root.update()
         
-        import subprocess
-        try:
-            result = subprocess.run(
-                ["python3", "km360_youtube_export.py", file_path],
-                capture_output=True, text=True, timeout=120
-            )
+        def do_export():
+            success_count = 0
+            skipped_count = 0
+            failed_count = 0
+            results = []
             
-            if result.returncode == 0:
-                self.yt_status.config(text="✓ Export complete!", foreground="green")
-                messagebox.showinfo("Success", 
-                    "Video exported successfully!\n\n"
-                    "The video is ready to upload to YouTube.")
-            else:
-                self.yt_status.config(text="✗ Export failed", foreground="red")
-                messagebox.showerror("Error", result.stderr)
-        except Exception as e:
-            self.yt_status.config(text="✗ Export failed", foreground="red")
-            messagebox.showerror("Error", str(e))
+            for i, file_path in enumerate(files):
+                if not os.path.exists(file_path):
+                    error_detail = f"File not found: {file_path}"
+                    logger.error(error_detail)
+                    results.append((os.path.basename(file_path), "File not found", error_detail))
+                    failed_count += 1
+                    continue
+                
+                # Update status
+                self.root.after(0, lambda p=os.path.basename(file_path), i=i, n=len(files): 
+                    self.yt_status.config(text=f"Processing {i+1}/{n}: {p[:30]}...", foreground="blue"))
+                
+                try:
+                    logger.debug(f"Processing: {file_path}")
+                    result = subprocess.run(
+                        ["python3", "km360_youtube_export.py", file_path],
+                        capture_output=True, text=True, timeout=120
+                    )
+                    
+                    logger.debug(f"  returncode: {result.returncode}")
+                    logger.debug(f"  stdout: {result.stdout[:500]}")
+                    logger.debug(f"  stderr: {result.stderr[:500]}")
+                    
+                    if result.returncode == 0:
+                        # Check if it was already tagged (look for indicators in output)
+                        stdout_lower = result.stdout.lower()
+                        stderr_lower = result.stderr.lower()
+                        if ("already has" in stdout_lower or 
+                            "already tagged" in stdout_lower or 
+                            "already has" in stderr_lower or
+                            "already tagged" in stderr_lower or
+                            "⏭" in result.stdout):
+                            logger.info(f"Already tagged: {file_path}")
+                            results.append((os.path.basename(file_path), "Already tagged", ""))
+                            skipped_count += 1
+                        else:
+                            logger.info(f"Successfully tagged: {file_path}")
+                            results.append((os.path.basename(file_path), "Success", ""))
+                            success_count += 1
+                    else:
+                        error_msg = result.stderr.strip() if result.stderr else "Unknown error"
+                        logger.error(f"Failed to process {file_path}: {error_msg}")
+                        results.append((os.path.basename(file_path), "Failed", error_msg))
+                        failed_count += 1
+                except Exception as e:
+                    error_msg = str(e)
+                    logger.exception(f"Exception processing {file_path}")
+                    results.append((os.path.basename(file_path), "Error", error_msg))
+                    failed_count += 1
+            
+            logger.info(f"Batch complete: {success_count} success, {skipped_count} skipped, {failed_count} failed")
+            self.root.after(0, lambda: self._export_complete(success_count, skipped_count, failed_count, results))
+        
+        threading.Thread(target=do_export, daemon=True).start()
+    
+    def _export_complete(self, success_count, skipped_count, failed_count, results):
+        """Called when export completes - shows copyable results dialog"""
+        total = success_count + skipped_count + failed_count
+        
+        if failed_count == 0:
+            self.yt_status.config(
+                text=f"✓ Done: {success_count} processed, {skipped_count} already tagged", 
+                foreground="green")
+        else:
+            self.yt_status.config(
+                text=f"Done: {success_count} OK, {skipped_count} skipped, {failed_count} failed", 
+                foreground="orange" if success_count > 0 else "red")
+        
+        # Build summary
+        summary = f"Processed {total} file(s): ✓ {success_count} tagged, ⏭ {skipped_count} already tagged, ✗ {failed_count} failed"
+        
+        # Show copyable results dialog
+        title = "Export Complete" if failed_count == 0 else "Export Complete (with errors)"
+        CopyableResultsDialog(self.root, title, results, summary)
 
     def setup_placeholder_tab(self, title, feature_key):
         """Setup a placeholder tab for future features"""
@@ -2732,6 +3172,22 @@ The desktop entry will be installed for the current user.
             "- USB port memory for quick reset\n\n"
             "License: MIT\n"
             "https://github.com/Innomen/KeyMission360Tools")
+    
+    def view_log_file(self):
+        """Open the log file in default text editor"""
+        try:
+            if LOG_FILE.exists():
+                # Try to open with xdg-open (Linux default)
+                subprocess.Popen(["xdg-open", str(LOG_FILE)],
+                                stdout=subprocess.DEVNULL, 
+                                stderr=subprocess.DEVNULL)
+            else:
+                messagebox.showinfo("Log File", 
+                    f"No log file exists yet.\n\nLog location:\n{LOG_FILE}")
+        except Exception as e:
+            # Fallback: show the path
+            messagebox.showinfo("Log File Location", 
+                f"Log file location:\n{LOG_FILE}\n\nError opening: {e}")
 
 
 def run_headless_test():

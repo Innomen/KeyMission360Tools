@@ -20,10 +20,19 @@ import argparse
 
 try:
     import usb1
-    import usb.core
-    USB_AVAILABLE = True
+    USB1_AVAILABLE = True
 except ImportError:
-    USB_AVAILABLE = False
+    USB1_AVAILABLE = False
+
+try:
+    import usb.core
+    import usb.util
+    PYUSB_AVAILABLE = True
+except ImportError:
+    PYUSB_AVAILABLE = False
+
+USB_AVAILABLE = USB1_AVAILABLE or PYUSB_AVAILABLE
+if not USB_AVAILABLE:
     print("Warning: pyusb/libusb1 not installed. Trying fallback methods...")
 
 
@@ -36,24 +45,43 @@ def find_camera():
     if not USB_AVAILABLE:
         return None, None
     
-    try:
-        context = usb1.USBContext()
-        for device in context.getDeviceIterator(skip_on_error=True):
-            if device.getVendorID() == VENDOR_ID and device.getProductID() == PRODUCT_ID:
-                return device.getBusNumber(), device.getDeviceAddress()
-            # Also check for other Nikon cameras
-            elif device.getVendorID() == VENDOR_ID:
-                return device.getBusNumber(), device.getDeviceAddress()
-    except Exception as e:
-        print(f"Error finding camera: {e}")
+    # Try libusb1 first (preferred)
+    if USB1_AVAILABLE:
+        try:
+            context = usb1.USBContext()
+            for device in context.getDeviceIterator(skip_on_error=True):
+                if device.getVendorID() == VENDOR_ID and device.getProductID() == PRODUCT_ID:
+                    return device.getBusNumber(), device.getDeviceAddress()
+                # Also check for other Nikon cameras
+                elif device.getVendorID() == VENDOR_ID:
+                    return device.getBusNumber(), device.getDeviceAddress()
+        except Exception as e:
+            print(f"libusb1 error finding camera: {e}")
+    
+    # Fallback to pyusb
+    if PYUSB_AVAILABLE:
+        try:
+            dev = usb.core.find(idVendor=VENDOR_ID, idProduct=PRODUCT_ID)
+            if dev:
+                # pyusb doesn't easily give bus/addr, return dummy values
+                return 0, 0
+            # Try any Nikon device
+            dev = usb.core.find(idVendor=VENDOR_ID)
+            if dev:
+                return 0, 0
+        except Exception as e:
+            print(f"pyusb error finding camera: {e}")
     
     return None, None
 
 
 def reset_with_pyusb():
     """Try to reset using pyusb"""
+    if not PYUSB_AVAILABLE:
+        return False
+    
     try:
-        dev = usb.core.find(idVendor=VENDOR_ID)
+        dev = usb.core.find(idVendor=VENDOR_ID, idProduct=PRODUCT_ID)
         if not dev:
             # Try any Nikon device
             dev = usb.core.find(idVendor=VENDOR_ID)
@@ -169,7 +197,8 @@ def main():
     print("\nAttempting USB reset...")
     
     # Try methods in order of preference
-    if reset_with_pyusb():
+    # Prefer libusb1 if available, fallback to pyusb
+    if PYUSB_AVAILABLE and reset_with_pyusb():
         print("\n✓ Reset successful!")
         print("  Wait a few seconds for the camera to reconnect.")
         return 0

@@ -40,12 +40,61 @@ def check_ffmpeg():
         return False
 
 
+def check_existing_metadata(input_file):
+    """Check if video already has 360° spherical metadata"""
+    try:
+        # Use ffprobe to check for spherical metadata
+        cmd = [
+            "ffprobe", "-v", "error",
+            "-show_entries", "stream_tags=spherical",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            input_file
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        # If spherical tag exists and is set to 1, it's already 360
+        if result.stdout.strip() in ['1', 'true', 'True']:
+            return True
+        
+        # Also check for other spherical metadata formats
+        cmd2 = [
+            "ffprobe", "-v", "error",
+            "-show_format", "-show_streams",
+            input_file
+        ]
+        result2 = subprocess.run(cmd2, capture_output=True, text=True, timeout=10)
+        output = result2.stdout.lower()
+        
+        # Check for various 360 metadata indicators
+        indicators = [
+            'spherical', 'equirectangular', 'projectiontype=equirectangular',
+            'gopro spherical', 'youtube 360'
+        ]
+        for indicator in indicators:
+            if indicator in output:
+                return True
+                
+    except Exception:
+        pass
+    return False
+
+
 def inject_metadata_ffmpeg(input_file, output_file):
     """
     Inject 360° metadata using ffmpeg (fast, no re-encode).
     
     This uses the 'spherical' metadata tag which YouTube recognizes.
     """
+    # Check if already tagged
+    if check_existing_metadata(input_file):
+        # Just copy the file without modification
+        import shutil
+        try:
+            shutil.copy2(input_file, output_file)
+            print(f"  ⏭ Already has 360° metadata - copied to {output_file}")
+            return True, "already_tagged"
+        except Exception as e:
+            return False, str(e)
+    
     cmd = [
         "ffmpeg", "-y", "-i", input_file,
         "-c", "copy",  # Copy streams without re-encoding
@@ -94,13 +143,14 @@ def process_file(input_file, output_file=None, method="auto"):
     
     Returns:
         (success: bool, message: str)
+        Message can be: "success", "already_tagged", or error description
     """
     input_path = Path(input_file)
     
     if not input_path.exists():
         return False, f"File not found: {input_file}"
     
-    if input_path.suffix.lower() not in ['.mp4', '.mov', '.avi']:
+    if input_path.suffix.lower() not in ['.mp4', '.mov', '.avi', '.mkv', '.m4v', '.3gp']:
         return False, f"Unsupported format: {input_path.suffix}"
     
     if output_file is None:
@@ -108,6 +158,17 @@ def process_file(input_file, output_file=None, method="auto"):
     
     print(f"Processing: {input_file}")
     print(f"Output: {output_file}")
+    
+    # Check if already tagged before processing
+    if check_existing_metadata(input_file):
+        # Copy the file anyway to provide the expected output
+        import shutil
+        try:
+            shutil.copy2(input_file, output_file)
+            print(f"  ⏭ Already has 360° metadata - copied to {output_file}")
+            return True, "already_tagged"
+        except Exception as e:
+            return False, str(e)
     
     # Choose method
     if method == "auto":
@@ -122,6 +183,9 @@ def process_file(input_file, output_file=None, method="auto"):
         success, msg = inject_metadata_ffmpeg(input_file, output_file)
     
     if success:
+        if msg == "already_tagged":
+            print(f"  ⏭ Already has 360° metadata")
+            return True, "already_tagged"
         # Verify output
         output_size = Path(output_file).stat().st_size
         input_size = input_path.stat().st_size
@@ -134,7 +198,7 @@ def process_file(input_file, output_file=None, method="auto"):
 
 def batch_process(directory, method="auto"):
     """Process all videos in a directory"""
-    video_extensions = ['.mp4', '.mov', '.avi']
+    video_extensions = ['.mp4', '.mov', '.avi', '.mkv', '.m4v', '.3gp']
     video_files = [f for f in Path(directory).iterdir() 
                    if f.suffix.lower() in video_extensions]
     
@@ -146,16 +210,23 @@ def batch_process(directory, method="auto"):
     print()
     
     success_count = 0
+    tagged_count = 0
+    failed_count = 0
+    
     for i, video_file in enumerate(video_files, 1):
         print(f"[{i}/{len(video_files)}] ", end="")
         success, msg = process_file(str(video_file), method=method)
         if success:
-            success_count += 1
+            if msg == "already_tagged":
+                tagged_count += 1
+            else:
+                success_count += 1
         else:
+            failed_count += 1
             print(f"  ✗ Failed: {msg}")
         print()
     
-    print(f"Done! {success_count}/{len(video_files)} files processed successfully")
+    print(f"Done! {success_count} tagged, {tagged_count} already had tags, {failed_count} failed")
 
 
 def run_headless_test():

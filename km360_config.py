@@ -114,8 +114,8 @@ class FileDialogProvider:
         raise NotImplementedError
     
     def ask_open_filename(self, title="Open File", initialdir=None,
-                          filetypes=None):
-        """Ask for open filename - returns path or None"""
+                          filetypes=None, multiple=False):
+        """Ask for open filename - returns path or list of paths, or None"""
         raise NotImplementedError
 
 
@@ -172,7 +172,7 @@ class TkFileDialog(FileDialogProvider):
         return result if result else None
     
     def ask_open_filename(self, title="Open File", initialdir=None,
-                          filetypes=None):
+                          filetypes=None, multiple=False):
         import tkinter as tk
         from tkinter import filedialog
         
@@ -185,13 +185,21 @@ class TkFileDialog(FileDialogProvider):
             parent=root,
             title=title,
             initialdir=initialdir or get_last_download_dir(),
-            filetypes=filetypes or [("All files", "*.*")]
+            filetypes=filetypes or [("All files", "*.*")],
+            multiple=multiple
         )
         
         if result:
-            set_last_download_dir(Path(result).parent)
+            if multiple:
+                # Result is a tuple of paths
+                if result:
+                    set_last_download_dir(Path(result[0]).parent)
+                return list(result) if result else None
+            else:
+                set_last_download_dir(Path(result).parent)
+                return result if result else None
         
-        return result if result else None
+        return None
 
 
 class GtkFileDialog(FileDialogProvider):
@@ -359,11 +367,17 @@ class GtkFileDialog(FileDialogProvider):
             all_filter.add_pattern("*")
             dialog.add_filter(all_filter)
         
+        # Enable multiple selection if requested
+        dialog.set_select_multiple(multiple)
+        
         response = dialog.run()
         result = None
         
         if response == Gtk.ResponseType.OK:
-            result = dialog.get_filename()
+            if multiple:
+                result = dialog.get_filenames()
+            else:
+                result = dialog.get_filename()
         
         dialog.destroy()
         
@@ -379,15 +393,19 @@ class GtkFileDialog(FileDialogProvider):
                 pass
         
         if result:
-            set_last_download_dir(Path(result).parent)
+            if multiple and result:
+                set_last_download_dir(Path(result[0]).parent)
+                return result
+            else:
+                set_last_download_dir(Path(result).parent)
         
         return result
     
     def ask_open_filename(self, title="Open File", initialdir=None,
-                          filetypes=None):
+                          filetypes=None, multiple=False):
         if not self.gtk_available:
             fallback = TkFileDialog(self.parent)
-            return fallback.ask_open_filename(title, initialdir, filetypes)
+            return fallback.ask_open_filename(title, initialdir, filetypes, multiple)
         
         Gtk = self.Gtk
         Gio = self.Gio
@@ -512,10 +530,10 @@ class KdeFileDialog(FileDialogProvider):
         return result
     
     def ask_open_filename(self, title="Open File", initialdir=None,
-                          filetypes=None):
+                          filetypes=None, multiple=False):
         if not self.kdialog_available:
             fallback = TkFileDialog(self.parent)
-            return fallback.ask_open_filename(title, initialdir, filetypes)
+            return fallback.ask_open_filename(title, initialdir, filetypes, multiple)
         
         initialdir = initialdir or get_last_download_dir()
         
@@ -531,11 +549,22 @@ class KdeFileDialog(FileDialogProvider):
         if filter_str:
             start_dir = f"{initialdir} {filter_str}"
         
-        args = ['--getopenfilename', start_dir, '--title', title]
+        if multiple:
+            args = ['--getopenfilename', start_dir, '--title', title, '--multiple', '--separate-output']
+        else:
+            args = ['--getopenfilename', start_dir, '--title', title]
+        
         result = self._run_kdialog(args)
         
         if result:
-            set_last_download_dir(Path(result).parent)
+            if multiple and result:
+                # kdialog returns multiple files separated by newlines
+                files = result.strip().split('\n')
+                if files:
+                    set_last_download_dir(Path(files[0]).parent)
+                return files
+            else:
+                set_last_download_dir(Path(result).parent)
         
         return result
 
@@ -609,10 +638,10 @@ def ask_saveas_filename(title="Save As", initialdir=None,
 
 
 def ask_open_filename(title="Open File", initialdir=None,
-                      filetypes=None, parent=None):
-    """Ask user for a file to open - returns path or None"""
+                      filetypes=None, parent=None, multiple=False):
+    """Ask user for a file to open - returns path or list of paths, or None"""
     dialog = get_file_dialog(parent)
-    return dialog.ask_open_filename(title, initialdir, filetypes)
+    return dialog.ask_open_filename(title, initialdir, filetypes, multiple)
 
 
 # =============================================================================
