@@ -84,16 +84,7 @@ def inject_metadata_ffmpeg(input_file, output_file):
     
     This uses the 'spherical' metadata tag which YouTube recognizes.
     """
-    # Check if already tagged
-    if check_existing_metadata(input_file):
-        # Just copy the file without modification
-        import shutil
-        try:
-            shutil.copy2(input_file, output_file)
-            print(f"  ⏭ Already has 360° metadata - copied to {output_file}")
-            return True, "already_tagged"
-        except Exception as e:
-            return False, str(e)
+    # Note: Already-tagged check is done in process_file before calling this
     
     cmd = [
         "ffmpeg", "-y", "-i", input_file,
@@ -106,7 +97,30 @@ def inject_metadata_ffmpeg(input_file, output_file):
     ]
     
     result = subprocess.run(cmd, capture_output=True, text=True)
-    return result.returncode == 0, result.stderr
+    
+    if result.returncode != 0:
+        # Build informative error message
+        error_parts = []
+        full_output = (result.stderr or "") + "\n" + (result.stdout or "")
+        
+        # Look for actual error lines
+        for line in full_output.split('\n'):
+            line_lower = line.lower()
+            if any(x in line_lower for x in ['error:', 'could not', 'failed', 'invalid', 'no such', 'permission denied', 'not found']):
+                # Skip version/header lines
+                if not any(skip in line_lower for skip in ['ffmpeg version', 'built with', 'configuration:', 'libavutil']):
+                    error_parts.append(line.strip())
+        
+        if error_parts:
+            error_msg = '; '.join(error_parts[-3:])  # Last 3 relevant errors
+        else:
+            # No clear error found - show truncated output
+            brief = ' '.join(full_output.split()[:20])  # First 20 words
+            error_msg = f"ffmpeg error (code {result.returncode}): {brief}..."
+        
+        return False, error_msg
+    
+    return True, "Success"
 
 
 def inject_metadata_spatialmedia(input_file, output_file):
@@ -132,19 +146,22 @@ def inject_metadata_spatialmedia(input_file, output_file):
         return False, str(e)
 
 
-def process_file(input_file, output_file=None, method="auto"):
+def process_file(input_file, output_file=None, method="auto", in_place=True):
     """
     Process a single video file.
     
     Args:
         input_file: Path to input MP4
-        output_file: Path to output (defaults to input_youtube.mp4)
+        output_file: Path to output (defaults to in-place modification)
         method: "auto", "ffmpeg", or "spatialmedia"
+        in_place: If True, modify original file; if False, create _youtube.mp4 copy
     
     Returns:
         (success: bool, message: str)
         Message can be: "success", "already_tagged", or error description
     """
+    import shutil
+    
     input_path = Path(input_file)
     
     if not input_path.exists():
@@ -153,50 +170,86 @@ def process_file(input_file, output_file=None, method="auto"):
     if input_path.suffix.lower() not in ['.mp4', '.mov', '.avi', '.mkv', '.m4v', '.3gp']:
         return False, f"Unsupported format: {input_path.suffix}"
     
+    # Determine output path
     if output_file is None:
-        output_file = str(input_path.with_suffix('')) + "_youtube.mp4"
+        if in_place:
+            output_file = input_file
+        else:
+            output_file = str(input_path.with_suffix('')) + "_youtube.mp4"
     
     print(f"Processing: {input_file}")
-    print(f"Output: {output_file}")
+    if output_file != input_file:
+        print(f"Output: {output_file}")
     
     # Check if already tagged before processing
     if check_existing_metadata(input_file):
-        # Copy the file anyway to provide the expected output
-        import shutil
-        try:
-            shutil.copy2(input_file, output_file)
-            print(f"  ⏭ Already has 360° metadata - copied to {output_file}")
-            return True, "already_tagged"
-        except Exception as e:
-            return False, str(e)
+        print(f"  ⚠ Already has 360° metadata - skipping")
+        return True, "already_tagged"
+    
+    # For in-place modification, use a temp file with proper .mp4 extension
+    temp_file = None
+    if output_file == input_file:
+        import tempfile
+        # Use system temp dir and proper .mp4 extension for ffmpeg
+        temp_dir = tempfile.gettempdir()
+        temp_name = input_path.stem + "_tmp_360.mp4"
+        temp_file = os.path.join(temp_dir, temp_name)
+        actual_output = temp_file
+    else:
+        actual_output = output_file
     
     # Choose method
     if method == "auto":
         # Try spatialmedia first, fallback to ffmpeg
-        success, msg = inject_metadata_spatialmedia(input_file, output_file)
+        success, msg = inject_metadata_spatialmedia(input_file, actual_output)
         if not success:
-            print(f"  spatialmedia failed ({msg}), trying ffmpeg...")
-            success, msg = inject_metadata_ffmpeg(input_file, output_file)
+            # Only print fallback message if it's just "not installed"
+            if "not installed" in msg:
+                print(f"  (spatialmedia not installed, using ffmpeg)")
+            else:
+                print(f"  spatialmedia error: {msg}, trying ffmpeg...", file=sys.stderr)
+            success, msg = inject_metadata_ffmpeg(input_file, actual_output)
     elif method == "spatialmedia":
-        success, msg = inject_metadata_spatialmedia(input_file, output_file)
+        success, msg = inject_metadata_spatialmedia(input_file, actual_output)
     else:
-        success, msg = inject_metadata_ffmpeg(input_file, output_file)
+        success, msg = inject_metadata_ffmpeg(input_file, actual_output)
     
     if success:
         if msg == "already_tagged":
+            if temp_file and Path(temp_file).exists():
+                Path(temp_file).unlink()
             print(f"  ⏭ Already has 360° metadata")
             return True, "already_tagged"
-        # Verify output
-        output_size = Path(output_file).stat().st_size
-        input_size = input_path.stat().st_size
-        size_diff = output_size - input_size
-        print(f"  ✓ Success! Size change: {size_diff / 1024:.1f} KB")
+        
+        # Move temp file to final location if in-place
+        if temp_file:
+            try:
+                # Preserve original file permissions/timestamps
+                orig_stat = input_path.stat()
+                shutil.move(temp_file, input_file)
+                # Try to preserve access/modify times
+                os.utime(input_file, (orig_stat.st_atime, orig_stat.st_mtime))
+                print(f"  ✓ Metadata injected in-place")
+            except Exception as e:
+                # Clean up temp file on failure
+                if Path(temp_file).exists():
+                    Path(temp_file).unlink()
+                return False, f"Failed to replace original file: {e}"
+        else:
+            # Verify output for non-in-place
+            output_size = Path(output_file).stat().st_size
+            input_size = input_path.stat().st_size
+            size_diff = output_size - input_size
+            print(f"  ✓ Success! Size change: {size_diff / 1024:.1f} KB")
         return True, "Metadata injected successfully"
     else:
+        # Clean up temp file on failure
+        if temp_file and Path(temp_file).exists():
+            Path(temp_file).unlink()
         return False, msg
 
 
-def batch_process(directory, method="auto"):
+def batch_process(directory, method="auto", in_place=True):
     """Process all videos in a directory"""
     video_extensions = ['.mp4', '.mov', '.avi', '.mkv', '.m4v', '.3gp']
     video_files = [f for f in Path(directory).iterdir() 
@@ -215,7 +268,7 @@ def batch_process(directory, method="auto"):
     
     for i, video_file in enumerate(video_files, 1):
         print(f"[{i}/{len(video_files)}] ", end="")
-        success, msg = process_file(str(video_file), method=method)
+        success, msg = process_file(str(video_file), method=method, in_place=in_place)
         if success:
             if msg == "already_tagged":
                 tagged_count += 1
@@ -223,7 +276,7 @@ def batch_process(directory, method="auto"):
                 success_count += 1
         else:
             failed_count += 1
-            print(f"  ✗ Failed: {msg}")
+            print(f"  ✗ Failed: {msg}", file=sys.stderr)
         print()
     
     print(f"Done! {success_count} tagged, {tagged_count} already had tags, {failed_count} failed")
@@ -244,7 +297,7 @@ def run_headless_test():
         version = result.stdout.split('\n')[0]
         print(f"  ✓ {version}")
     else:
-        print("  ✗ ffmpeg not found")
+        print("  ✗ ffmpeg not found", file=sys.stderr)
     
     # Test 2: Check spatialmedia
     print("\n[TEST 2] Checking spatialmedia library...")
@@ -297,6 +350,8 @@ Installation:
                        help="Batch process all videos in directory")
     parser.add_argument("--method", "-m", choices=["auto", "ffmpeg", "spatialmedia"],
                        default="auto", help="Metadata injection method")
+    parser.add_argument("--copy", "-c", action="store_true",
+                       help="Create a copy with _youtube.mp4 suffix instead of modifying in-place")
     parser.add_argument("--headless", "--test", "-t", action="store_true",
                        help="Run headless tests")
     
@@ -318,15 +373,15 @@ Installation:
     print()
     
     if args.batch:
-        batch_process(args.input, method=args.method)
+        batch_process(args.input, method=args.method, in_place=not args.copy)
     else:
-        success, msg = process_file(args.input, args.output, method=args.method)
+        success, msg = process_file(args.input, args.output, method=args.method, in_place=not args.copy)
         if success:
             print("\n✓ Export complete!")
             print("\nUpload to YouTube and it will automatically recognize")
             print("this as a 360° video with full spherical playback.")
         else:
-            print(f"\n✗ Export failed: {msg}")
+            print(f"\n✗ Export failed: {msg}", file=sys.stderr)
             sys.exit(1)
 
 

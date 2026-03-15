@@ -92,6 +92,10 @@ USB_AVAILABLE = USB1_AVAILABLE or PYUSB_AVAILABLE
 VERSION = "1.0"
 APP_NAME = "KeyMission 360 Linux Utility"
 
+# Absolute path to youtube export script (allows running GUI from any directory)
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+YOUTUBE_EXPORT_SCRIPT = os.path.join(SCRIPT_DIR, "km360_youtube_export.py")
+
 # Placeholder features for future versions
 PLACEHOLDER_FEATURES = {
     "batch_ops": "Batch Operations - Coming in v2.0",
@@ -1763,7 +1767,7 @@ Requirements:
         def do_batch():
             try:
                 result = subprocess.run(
-                    ["python3", "km360_youtube_export.py", "--batch", folder_path],
+                    ["python3", YOUTUBE_EXPORT_SCRIPT, "--batch", folder_path],
                     capture_output=True, text=True, timeout=300
                 )
                 
@@ -2004,7 +2008,7 @@ Requirements:
                 try:
                     logger.debug(f"Processing: {file_path}")
                     result = subprocess.run(
-                        ["python3", "km360_youtube_export.py", file_path],
+                        ["python3", YOUTUBE_EXPORT_SCRIPT, file_path],
                         capture_output=True, text=True, timeout=120
                     )
                     
@@ -2029,7 +2033,22 @@ Requirements:
                             results.append((os.path.basename(file_path), "Success", ""))
                             success_count += 1
                     else:
-                        error_msg = result.stderr.strip() if result.stderr else "Unknown error"
+                        # Build detailed error message from both stdout and stderr
+                        error_parts = []
+                        if result.stderr and result.stderr.strip():
+                            error_parts.append(result.stderr.strip())
+                        if result.stdout and result.stdout.strip():
+                            error_parts.append(result.stdout.strip())
+                        
+                        if error_parts:
+                            error_msg = " | ".join(error_parts)
+                        else:
+                            error_msg = f"Exit code {result.returncode}"
+                        
+                        # Limit length for display
+                        if len(error_msg) > 300:
+                            error_msg = error_msg[:300] + "..."
+                        
                         logger.error(f"Failed to process {file_path}: {error_msg}")
                         results.append((os.path.basename(file_path), "Failed", error_msg))
                         failed_count += 1
