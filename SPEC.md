@@ -567,7 +567,45 @@ camera = gp.Camera()
 ### 7.2 360° Metadata
 The camera embeds 360° metadata in:
 - **Photos**: EXIF tags for spherical projection
-- **Videos**: Spatial Media metadata (Google format)
+- **Videos**: Spatial Media metadata (Google format) in `side_data` (Spherical Mapping)
+
+**Video Metadata Format** (as stored by camera):
+```json
+{
+  "side_data_type": "Spherical Mapping",
+  "projection": "equirectangular",
+  "yaw": 0,
+  "pitch": 0,
+  "roll": 0
+}
+```
+
+**CRITICAL FINDING**: ffmpeg **CANNOT** inject 360° spherical metadata into MP4 files. The `-metadata:s:v:0 spherical=1` and similar flags only appear in ffmpeg's console output but are **NOT written** to the output file when using `-c copy`. This is a known limitation of ffmpeg.
+
+**Metadata Injection Methods** (in order of preference):
+
+1. **ExifTool** (RECOMMENDED - GPL/Artistic License)
+   - Most reliable and FOSS-friendly option
+   - Writes XMP-GSpherical tags directly to MP4
+   - Install: `sudo pacman -S perl-image-exiftool`
+   - Writes metadata that looks like:
+   ```xml
+   <XMP-GSpherical:Spherical>true</XMP-GSpherical:Spherical>
+   <XMP-GSpherical:ProjectionType>equirectangular</XMP-GSpherical:ProjectionType>
+   <XMP-GSpherical:StereoMode>mono</XMP-GSpherical:StereoMode>
+   ```
+
+2. **spatialmedia** (Alternative - Apache License)
+   - Google's official Python library
+   - Injects UUID box with XMP GSpherical extension
+   - Install: `git clone https://github.com/google/spatial-media.git && cd spatial-media && pip install .`
+
+3. **ffmpeg** (NOT RECOMMENDED - fallback only)
+   - Can only **preserve** existing metadata during copy
+   - **Cannot** add new metadata to files that lost it (e.g., merged videos)
+   - Will fail validation for files without existing metadata
+
+**How it works**: Both ExifTool and spatialmedia inject XMP metadata following Google's Spherical Video specification. YouTube reads this metadata to detect 360° videos and enable spherical playback.
 
 ### 7.3 Projection Types
 - **Equirectangular** (Plate Carree): Native camera output

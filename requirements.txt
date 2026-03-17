@@ -7,3 +7,12 @@ libusb1>=3.0.0
 
 # Alternative USB library (uncomment if preferred)
 # pyusb>=1.2.1
+
+# For YouTube 360 metadata injection (optional but recommended)
+# Install ExifTool via system package manager:
+#   Arch: sudo pacman -S perl-image-exiftool
+#   Ubuntu/Debian: sudo apt-get install libimage-exiftool-perl
+#   macOS: brew install exiftool
+#   Windows: https://exiftool.org/
+# Alternative: spatialmedia (Google's tool)
+#   pip install git+https://github.com/google/spatial-media.git

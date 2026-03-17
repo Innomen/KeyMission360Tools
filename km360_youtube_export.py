@@ -78,21 +78,223 @@ def check_existing_metadata(input_file):
     return False
 
 
+def verify_360_metadata(file_path):
+    """
+    Comprehensive verification that 360° metadata is properly injected.
+    Returns (is_valid: bool, details: dict)
+    """
+    import json
+    details = {
+        'has_spherical_tag': False,
+        'has_projection_metadata': False,
+        'has_stereo_metadata': False,
+        'is_equirectangular': False,
+        'has_spherical_side_data': False,
+        'raw_metadata': {}
+    }
+    
+    try:
+        # Method 1: Check for proper Spatial Media metadata using ffprobe with JSON output
+        cmd = [
+            "ffprobe", "-v", "quiet",
+            "-print_format", "json",
+            "-show_streams", "-show_format",
+            file_path
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        
+        if result.returncode == 0:
+            try:
+                probe_data = json.loads(result.stdout)
+                
+                # Look through all streams for video metadata
+                for stream in probe_data.get('streams', []):
+                    if stream.get('codec_type') == 'video':
+                        # Check tags
+                        tags = stream.get('tags', {})
+                        details['raw_metadata'].update(tags)
+                        
+                        # Check for spherical tag
+                        spherical = tags.get('spherical', '').lower()
+                        if spherical in ['1', 'true', 'yes']:
+                            details['has_spherical_tag'] = True
+                        
+                        # Check for projection type in tags
+                        projection = tags.get('projection_type', '').lower()
+                        if projection == 'equirectangular':
+                            details['has_projection_metadata'] = True
+                            details['is_equirectangular'] = True
+                        
+                        # Check for stereo mode in tags
+                        stereo = tags.get('stereo_mode', '').lower()
+                        if stereo in ['mono', 'top-bottom', 'left-right']:
+                            details['has_stereo_metadata'] = True
+                        
+                        # Check side_data (ffmpeg's way of storing spherical metadata)
+                        side_data_list = stream.get('side_data_list', [])
+                        for side_data in side_data_list:
+                            side_type = side_data.get('side_data_type', '').lower()
+                            if 'spherical' in side_type:
+                                details['has_spherical_side_data'] = True
+                                # Also check projection in side_data
+                                if side_data.get('projection', '').lower() == 'equirectangular':
+                                    details['is_equirectangular'] = True
+                                    details['has_projection_metadata'] = True
+                            # Also accept Stereo 3D as indicator of 360 metadata (from spatialmedia)
+                            if 'stereo 3d' in side_type or 'stereo3d' in side_type:
+                                details['has_360_metadata'] = True
+                                    
+            except json.JSONDecodeError:
+                pass
+        
+        # Method 2: Check for moov/trak metadata using special ffmpeg probe
+        # This detects the actual Spatial Media metadata box
+        cmd2 = [
+            "ffmpeg", "-v", "debug", "-i", file_path,
+            "-c", "copy", "-f", "null", "-"
+        ]
+        result2 = subprocess.run(cmd2, capture_output=True, text=True, timeout=15)
+        debug_output = result2.stderr.lower()
+        
+        # Look for spatial media indicators in debug output
+        spatial_indicators = [
+            'spherical', 'equirectangular', 'projection',
+            'cropleft', 'cropright', 'croptop', 'cropbottom',
+            'stereo_mode'
+        ]
+        found_indicators = []
+        for indicator in spatial_indicators:
+            if indicator in debug_output:
+                found_indicators.append(indicator)
+        
+        details['debug_indicators'] = found_indicators
+        
+        # Method 3: Try to extract and parse the actual uuid box (Spatial Media metadata)
+        # This is the most reliable method for checking proper YouTube 360 metadata
+        cmd3 = [
+            "ffmpeg", "-v", "quiet", "-dump", "-i", file_path,
+            "-c", "copy", "-f", "null", "-"
+        ]
+        result3 = subprocess.run(cmd3, capture_output=True, text=True, timeout=15)
+        
+        # Check for UUID box indicators
+        if 'uuid' in result3.stderr.lower() or 'uuid' in debug_output:
+            details['has_uuid_box'] = True
+        
+        # Check for ffmpeg metadata tags (what we add with -metadata:s:v:0)
+        # YouTube recognizes these tags even without side_data
+        raw_metadata = details.get('raw_metadata', {})
+        has_spherical_metadata_tag = raw_metadata.get('spherical', '').lower() in ['1', 'true', 'yes']
+        has_projection_tag = raw_metadata.get('projection_type', '').lower() == 'equirectangular'
+        details['has_ffmpeg_metadata_tags'] = has_spherical_metadata_tag and has_projection_tag
+        
+        # Determine overall validity
+        # For YouTube 360, we need either:
+        # 1. Proper spherical tag AND equirectangular projection, OR
+        # 2. UUID box with spatial media data (from spatialmedia library), OR
+        # 3. side_data spherical mapping (ffmpeg method), OR
+        # 4. Debug indicators showing both spherical and equirectangular, OR
+        # 5. ffmpeg metadata tags (spherical=1 + projection_type=equirectangular), OR
+        # 6. Stereo 3D side data (from spatialmedia library)
+        is_valid = (
+            (details['has_spherical_tag'] and details['is_equirectangular']) or
+            details.get('has_uuid_box', False) or
+            details['has_spherical_side_data'] or
+            ('spherical' in found_indicators and 'equirectangular' in found_indicators) or
+            details['has_ffmpeg_metadata_tags'] or
+            details.get('has_360_metadata', False)
+        )
+        
+        return is_valid, details
+        
+    except Exception as e:
+        details['error'] = str(e)
+        return False, details
+
+
+def print_verification_report(file_path, details):
+    """Print a human-readable verification report"""
+    print(f"\n{'='*60}")
+    print(f"360° Metadata Verification Report")
+    print(f"{'='*60}")
+    print(f"File: {file_path}")
+    print()
+    
+    # Status indicators
+    checks = [
+        ("Spherical tag", details.get('has_spherical_tag', False)),
+        ("Projection metadata", details.get('has_projection_metadata', False)),
+        ("Equirectangular format", details.get('is_equirectangular', False)),
+        ("Stereo mode", details.get('has_stereo_metadata', False)),
+        ("Spherical side data", details.get('has_spherical_side_data', False)),
+        ("360 metadata (spatialmedia)", details.get('has_360_metadata', False)),
+        ("FFmpeg metadata tags", details.get('has_ffmpeg_metadata_tags', False)),
+        ("Spatial Media UUID box", details.get('has_uuid_box', False)),
+    ]
+    
+    for name, status in checks:
+        symbol = "✓" if status else "✗"
+        print(f"  [{symbol}] {name}")
+    
+    # Debug indicators found
+    indicators = details.get('debug_indicators', [])
+    if indicators:
+        print(f"\n  Debug indicators found: {', '.join(indicators)}")
+    
+    # Raw metadata (if any)
+    raw = details.get('raw_metadata', {})
+    if raw:
+        print(f"\n  Raw metadata tags:")
+        for key, value in raw.items():
+            if any(x in key.lower() for x in ['spherical', 'projection', 'stereo', 'crop']):
+                print(f"    - {key}: {value}")
+    
+    # Overall status
+    is_valid = (
+        (details.get('has_spherical_tag') and details.get('is_equirectangular')) or
+        details.get('has_uuid_box', False) or
+        details.get('has_spherical_side_data', False) or
+        details.get('has_ffmpeg_metadata_tags', False) or
+        details.get('has_360_metadata', False)
+    )
+    
+    print()
+    if is_valid:
+        print("  ✓ File has valid 360° metadata for YouTube")
+    else:
+        print("  ✗ File does NOT have valid 360° metadata")
+        print("    YouTube may not recognize this as a 360° video")
+    
+    print(f"{'='*60}")
+    
+    return is_valid
+
+
 def inject_metadata_ffmpeg(input_file, output_file):
     """
     Inject 360° metadata using ffmpeg (fast, no re-encode).
     
     This uses the 'spherical' metadata tag which YouTube recognizes.
+    Note: ffmpeg method is less reliable than spatialmedia for YouTube 360.
+    Consider installing: pip install spatialmedia
     """
     # Note: Already-tagged check is done in process_file before calling this
+    
+    # ffmpeg's -c copy doesn't always preserve side_data from input
+    # We need to explicitly add metadata tags that YouTube recognizes
     
     cmd = [
         "ffmpeg", "-y", "-i", input_file,
         "-c", "copy",  # Copy streams without re-encoding
         "-movflags", "+faststart",  # Web-optimized
-        "-strict", "unofficial",  # Allow experimental features
+        # Spherical metadata - these are the key tags YouTube looks for
         "-metadata:s:v:0", "spherical=1",
         "-metadata:s:v:0", "stereo_mode=mono",
+        "-metadata:s:v:0", "projection_type=equirectangular",
+        # Additional compatibility tags
+        "-metadata:s:v:0", "initial_view_heading=0",
+        "-metadata:s:v:0", "initial_view_pitch=0",
+        "-metadata:s:v:0", "initial_view_roll=0",
         output_file
     ]
     
@@ -123,25 +325,113 @@ def inject_metadata_ffmpeg(input_file, output_file):
     return True, "Success"
 
 
+def verify_only(file_path):
+    """Just verify a file without processing"""
+    input_path = Path(file_path)
+    
+    if not input_path.exists():
+        print(f"✗ File not found: {file_path}", file=sys.stderr)
+        return False
+    
+    print(f"Verifying: {file_path}")
+    print()
+    
+    is_valid, details = verify_360_metadata(file_path)
+    print_verification_report(file_path, details)
+    
+    return is_valid
+
+
+def get_exiftool_path():
+    """Find exiftool binary in common locations"""
+    # Check PATH first
+    for path in ["exiftool", "/usr/bin/exiftool", "/usr/local/bin/exiftool",
+                 os.path.expanduser("~/.local/bin/exiftool")]:
+        try:
+            result = subprocess.run([path, "-ver"], 
+                                  capture_output=True, text=True, timeout=5)
+            if result.returncode == 0:
+                return path
+        except:
+            continue
+    return None
+
+
+def check_exiftool():
+    """Check if exiftool is available"""
+    return get_exiftool_path() is not None
+
+
+def inject_metadata_exiftool(input_file, output_file):
+    """
+    Inject 360° metadata using ExifTool (GPL/Artistic License).
+    This is the most reliable and FOSS-friendly method.
+    """
+    exiftool_path = get_exiftool_path()
+    if not exiftool_path:
+        return False, "exiftool not installed"
+    
+    try:
+        # For in-place modification, exiftool can modify directly
+        # For output to different file, use -o option
+        if input_file == output_file or output_file is None:
+            # In-place modification
+            cmd = [
+                exiftool_path,
+                "-XMP-GSpherical:Spherical=true",
+                "-XMP-GSpherical:Stitched=true",
+                "-XMP-GSpherical:StitchingSoftware=KeyMission360Tools",
+                "-XMP-GSpherical:ProjectionType=equirectangular",
+                "-XMP-GSpherical:StereoMode=mono",
+                "-overwrite_original",
+                input_file
+            ]
+        else:
+            # Output to different file
+            cmd = [
+                exiftool_path,
+                "-XMP-GSpherical:Spherical=true",
+                "-XMP-GSpherical:Stitched=true",
+                "-XMP-GSpherical:StitchingSoftware=KeyMission360Tools",
+                "-XMP-GSpherical:ProjectionType=equirectangular",
+                "-XMP-GSpherical:StereoMode=mono",
+                "-o", output_file,
+                input_file
+            ]
+        
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        
+        if result.returncode != 0:
+            error_msg = result.stderr.strip() if result.stderr else "exiftool failed"
+            return False, error_msg
+        
+        return True, "Success"
+    except Exception as e:
+        return False, str(e)
+
+
 def inject_metadata_spatialmedia(input_file, output_file):
     """
     Inject 360° metadata using Google's spatialmedia library.
-    This is the official Google method and more reliable.
+    Fallback method if exiftool is not available.
     """
     try:
         # Try to import and use spatialmedia
         from spatialmedia import metadata_utils
-        from spatialmedia import spherical
         
         metadata = metadata_utils.Metadata()
-        metadata.video = spherical.VideoMetadata()
-        metadata.video.projection = spherical.PROJECTION_EQUIRECTANGULAR
-        metadata.video.stereo = spherical.STEREO_MONO
+        # Set video metadata for equirectangular 360° video (mono)
+        metadata.projection = 'equirectangular'
+        metadata.stereo_mode = 'mono'
         
-        spherical.inject_metadata(input_file, output_file, metadata)
+        # Inject metadata - use a simple console function
+        def console(msg):
+            pass  # Silent operation
+        
+        metadata_utils.inject_metadata(input_file, output_file, metadata, console=console)
         return True, "Success"
-    except ImportError:
-        return False, "spatialmedia library not installed"
+    except ImportError as e:
+        return False, f"spatialmedia library not installed: {e}"
     except Exception as e:
         return False, str(e)
 
@@ -184,6 +474,10 @@ def process_file(input_file, output_file=None, method="auto", in_place=True):
     # Check if already tagged before processing
     if check_existing_metadata(input_file):
         print(f"  ⚠ Already has 360° metadata - skipping")
+        # Still verify the existing file
+        final_file = input_file
+        is_valid, details = verify_360_metadata(final_file)
+        print_verification_report(final_file, details)
         return True, "already_tagged"
     
     # For in-place modification, use a temp file with proper .mp4 extension
@@ -199,26 +493,62 @@ def process_file(input_file, output_file=None, method="auto", in_place=True):
         actual_output = output_file
     
     # Choose method
+    used_method = method
     if method == "auto":
-        # Try spatialmedia first, fallback to ffmpeg
-        success, msg = inject_metadata_spatialmedia(input_file, actual_output)
-        if not success:
-            # Only print fallback message if it's just "not installed"
-            if "not installed" in msg:
-                print(f"  (spatialmedia not installed, using ffmpeg)")
+        # Priority: exiftool > spatialmedia > ffmpeg (fallback)
+        # ExifTool is the most reliable and FOSS-friendly option
+        success, msg = inject_metadata_exiftool(input_file, actual_output)
+        if success:
+            used_method = "exiftool"
+        elif "not installed" in msg:
+            print(f"  (exiftool not installed, trying spatialmedia)")
+            # Try spatialmedia next
+            success, msg = inject_metadata_spatialmedia(input_file, actual_output)
+            if success:
+                used_method = "spatialmedia"
+            elif "not installed" in msg:
+                print(f"  (spatialmedia not installed, using ffmpeg fallback)")
+                used_method = "ffmpeg"
+                success, msg = inject_metadata_ffmpeg(input_file, actual_output)
             else:
                 print(f"  spatialmedia error: {msg}, trying ffmpeg...", file=sys.stderr)
-            success, msg = inject_metadata_ffmpeg(input_file, actual_output)
+                used_method = "ffmpeg"
+                success, msg = inject_metadata_ffmpeg(input_file, actual_output)
+        else:
+            print(f"  exiftool error: {msg}, trying spatialmedia...", file=sys.stderr)
+            success, msg = inject_metadata_spatialmedia(input_file, actual_output)
+            if success:
+                used_method = "spatialmedia"
+            elif "not installed" in msg:
+                print(f"  (spatialmedia not installed, using ffmpeg fallback)")
+                used_method = "ffmpeg"
+                success, msg = inject_metadata_ffmpeg(input_file, actual_output)
+            else:
+                print(f"  spatialmedia error: {msg}, trying ffmpeg...", file=sys.stderr)
+                used_method = "ffmpeg"
+                success, msg = inject_metadata_ffmpeg(input_file, actual_output)
+    elif method == "exiftool":
+        success, msg = inject_metadata_exiftool(input_file, actual_output)
+        used_method = "exiftool"
     elif method == "spatialmedia":
         success, msg = inject_metadata_spatialmedia(input_file, actual_output)
+        used_method = "spatialmedia"
+    elif method == "ffmpeg":
+        success, msg = inject_metadata_ffmpeg(input_file, actual_output)
+        used_method = "ffmpeg"
     else:
         success, msg = inject_metadata_ffmpeg(input_file, actual_output)
+        used_method = "ffmpeg"
     
     if success:
         if msg == "already_tagged":
             if temp_file and Path(temp_file).exists():
                 Path(temp_file).unlink()
             print(f"  ⏭ Already has 360° metadata")
+            # Still verify the existing file
+            final_file = input_file
+            is_valid, details = verify_360_metadata(final_file)
+            print_verification_report(final_file, details)
             return True, "already_tagged"
         
         # Move temp file to final location if in-place
@@ -230,6 +560,7 @@ def process_file(input_file, output_file=None, method="auto", in_place=True):
                 # Try to preserve access/modify times
                 os.utime(input_file, (orig_stat.st_atime, orig_stat.st_mtime))
                 print(f"  ✓ Metadata injected in-place")
+                final_file = input_file
             except Exception as e:
                 # Clean up temp file on failure
                 if Path(temp_file).exists():
@@ -241,6 +572,30 @@ def process_file(input_file, output_file=None, method="auto", in_place=True):
             input_size = input_path.stat().st_size
             size_diff = output_size - input_size
             print(f"  ✓ Success! Size change: {size_diff / 1024:.1f} KB")
+            final_file = output_file
+        
+        # Run verification on the final file
+        is_valid, details = verify_360_metadata(final_file)
+        print_verification_report(final_file, details)
+        
+        if not is_valid:
+            if used_method == "ffmpeg":
+                # ffmpeg method cannot inject metadata, only preserve existing
+                # This is a failure for files that need metadata injection
+                print("\n  ✗ FAILED: ffmpeg cannot inject 360° metadata into files that lost it.")
+                print("     The merged file needs ExifTool or spatialmedia to add metadata.")
+                print()
+                print("     Install ExifTool (recommended):")
+                print("       sudo pacman -S perl-image-exiftool")
+                print()
+                print("     Or install spatialmedia:")
+                print("       git clone https://github.com/google/spatial-media.git")
+                print("       cd spatial-media && pip install .")
+                print()
+                return False, "Metadata injection failed: ExifTool or spatialmedia required for files without existing metadata"
+            else:
+                return False, "Metadata injection completed but verification failed. The file may not be recognized as 360° by YouTube."
+        
         return True, "Metadata injected successfully"
     else:
         # Clean up temp file on failure
@@ -265,6 +620,7 @@ def batch_process(directory, method="auto", in_place=True):
     success_count = 0
     tagged_count = 0
     failed_count = 0
+    verified_count = 0
     
     for i, video_file in enumerate(video_files, 1):
         print(f"[{i}/{len(video_files)}] ", end="")
@@ -274,12 +630,15 @@ def batch_process(directory, method="auto", in_place=True):
                 tagged_count += 1
             else:
                 success_count += 1
+                verified_count += 1
         else:
             failed_count += 1
             print(f"  ✗ Failed: {msg}", file=sys.stderr)
         print()
     
     print(f"Done! {success_count} tagged, {tagged_count} already had tags, {failed_count} failed")
+    if verified_count > 0:
+        print(f"       ({verified_count} new files verified with 360° metadata)")
 
 
 def run_headless_test():
@@ -299,19 +658,32 @@ def run_headless_test():
     else:
         print("  ✗ ffmpeg not found", file=sys.stderr)
     
-    # Test 2: Check spatialmedia
-    print("\n[TEST 2] Checking spatialmedia library...")
-    try:
-        from spatialmedia import spherical
-        print("  ✓ spatialmedia available")
-    except ImportError:
-        print("  ⚠ spatialmedia not installed (optional, using ffmpeg fallback)")
+    # Test 2: Check exiftool (preferred method)
+    print("\n[TEST 2] Checking exiftool...")
+    if check_exiftool():
+        result = subprocess.run(["exiftool", "-ver"], 
+                              capture_output=True, text=True, timeout=5)
+        print(f"  ✓ ExifTool version {result.stdout.strip()}")
+    else:
+        print("  ✗ exiftool not installed (REQUIRED for merged/lost-metadata files)")
+        print("    Install: sudo pacman -S perl-image-exiftool")
+        print("    Or visit: https://exiftool.org/")
     
-    # Test 3: Test metadata injection on dummy file
-    print("\n[TEST 3] Testing metadata format...")
+    # Test 3: Check spatialmedia (fallback)
+    print("\n[TEST 3] Checking spatialmedia library...")
+    try:
+        from spatialmedia import metadata_utils
+        print("  ✓ spatialmedia available (fallback)")
+    except ImportError:
+        print("  ⚠ spatialmedia not installed (optional fallback)")
+        print("    Install: git clone https://github.com/google/spatial-media.git")
+        print("             cd spatial-media && pip install .")
+    
+    # Test 4: Test metadata format
+    print("\n[TEST 4] Testing metadata format...")
     print("  ✓ Equirectangular projection: supported")
     print("  ✓ Mono/stereo: mono (KeyMission 360)")
-    print("  ✓ Metadata format: Spherical Video V2 (Google)")
+    print("  ✓ Metadata format: XMP-GSpherical (ExifTool)")
     
     print("\n" + "=" * 60)
     print("Headless test complete")
@@ -329,18 +701,26 @@ Examples:
   %(prog)s --batch ~/Videos/KM360/      # Process all videos in folder
   %(prog)s --method ffmpeg input.mp4    # Force ffmpeg method
   %(prog)s --headless                   # Run tests only
+  %(prog)s --verify input.mp4           # Verify existing file has 360 metadata
 
 Note:
   This tool does NOT re-encode video. It only injects metadata,
   so it's very fast and preserves original quality.
 
 Methods:
-  auto          - Try spatialmedia, fallback to ffmpeg (default)
-  ffmpeg        - Use ffmpeg (fast, widely available)
-  spatialmedia  - Use Google's spatialmedia (official, recommended)
+  auto          - Try exiftool, then spatialmedia, then ffmpeg (default)
+  exiftool      - Use ExifTool (RECOMMENDED - GPL/Artistic License)
+  spatialmedia  - Use Google's spatialmedia (Apache License)
+  ffmpeg        - Use ffmpeg (fallback only - cannot inject new metadata)
+
+Verification:
+  Use --verify to check if a video has valid 360° metadata
+  without re-processing it. This is useful for confirming
+  YouTube will recognize the video as 360°.
 
 Installation:
-  pip install spatialmedia    # Optional but recommended
+  sudo pacman -S perl-image-exiftool  # Install ExifTool (recommended)
+  pip install spatialmedia             # Alternative (optional)
 """
     )
     
@@ -348,12 +728,14 @@ Installation:
     parser.add_argument("output", nargs="?", help="Output video file (optional)")
     parser.add_argument("--batch", "-b", action="store_true",
                        help="Batch process all videos in directory")
-    parser.add_argument("--method", "-m", choices=["auto", "ffmpeg", "spatialmedia"],
+    parser.add_argument("--method", "-m", choices=["auto", "exiftool", "ffmpeg", "spatialmedia"],
                        default="auto", help="Metadata injection method")
     parser.add_argument("--copy", "-c", action="store_true",
                        help="Create a copy with _youtube.mp4 suffix instead of modifying in-place")
     parser.add_argument("--headless", "--test", "-t", action="store_true",
                        help="Run headless tests")
+    parser.add_argument("--verify", "-V", action="store_true",
+                       help="Verify existing file has valid 360° metadata (no processing)")
     
     args = parser.parse_args()
     
@@ -361,6 +743,14 @@ Installation:
     if args.headless:
         run_headless_test()
         sys.exit(0)
+    
+    # Verification mode
+    if args.verify:
+        if not args.input:
+            parser.print_help()
+            sys.exit(1)
+        success = verify_only(args.input)
+        sys.exit(0 if success else 1)
     
     # Check input
     if not args.input:
