@@ -225,6 +225,38 @@ KeyMissionUtility.View
 
 ### 5.1 Completed Tools
 
+#### km360 (v2.0) - NEW: Standalone CLI
+- **Purpose**: Single-file CLI combining all toolkit functionality
+- **Location**: `km360` (executable, 66KB)
+- **Documentation**: `KM360_CLI.md`
+- **Features**:
+  - **12 Subcommands**: info, format, time, list, download, reset, viewer, youtube, wifi, settings, install, gui
+  - **Self-contained**: Embeds implementations of all tools
+  - **Fallback Support**: Uses gphoto2 when libusb1 unavailable
+  - **Progress Tracking**: Real-time download progress with resume/checksum
+  - **360° Viewer**: Full equirectangular viewer embedded
+  - **YouTube Export**: Metadata injection with multiple methods
+- **Commands**:
+  ```bash
+  km360 info              # USB/PTP device information
+  km360 format            # Format SD card via PTP
+  km360 time              # Sync camera time
+  km360 list              # List files on camera
+  km360 download          # Download with resume/checksum
+  km360 reset             # Reset USB port
+  km360 viewer            # 360° image/video viewer
+  km360 youtube           # Inject 360° metadata
+  km360 wifi              # Configure WiFi settings
+  km360 settings          # Camera settings
+  km360 install           # Add to application menu
+  km360 gui               # Launch GUI (if available)
+  ```
+- **Installation**:
+  ```bash
+  chmod +x km360
+  sudo cp km360 /usr/local/bin/  # Optional: install to PATH
+  ```
+
 #### km360_download.py (v1.6) - NEW
 - **Purpose**: Reliable file download with resume, checksums, and retry
 - **Features**:
@@ -473,6 +505,28 @@ MainWindow (tkinter)
 ## 6. Technical Implementation Details
 
 ### 6.1 Dependencies
+
+#### Standalone CLI (km360)
+```
+Python 3.8+
+├── gphoto2 (system package) - Camera communication
+├── libusb1 (pip) - Raw PTP commands (optional, fallback to gphoto2)
+├── numpy (pip) - 360° viewer projection math
+├── Pillow (pip) - Image handling for viewer
+└── opencv-python (pip) - Video support in viewer (optional)
+```
+**Installation**:
+```bash
+# Core (required)
+sudo apt-get install gphoto2
+pip install libusb1
+
+# For 360° viewer support
+pip install numpy Pillow opencv-python
+
+# For YouTube export
+sudo apt-get install ffmpeg
+```
 
 #### Core Dependencies
 ```
@@ -788,6 +842,17 @@ This project is especially valuable for:
   - Quick Open dropdown in Viewer tab
 - All tools now support `--headless` test mode
 
+### v2.0 (2026-03-17) - NEW: Standalone CLI
+- **NEW**: Standalone CLI Tool (`km360`)
+  - Single-file executable combining all functionality
+  - 12 subcommands: info, format, time, list, download, reset, viewer, youtube, wifi, settings, install, gui
+  - Self-contained with embedded implementations
+  - No GUI dependencies required for core functions
+  - Automatic fallback to gphoto2 when libusb1 unavailable
+  - Comprehensive help system with examples
+  - Desktop entry installation support
+- **Documentation**: `KM360_CLI.md` - Complete CLI reference
+
 ### v1.0 (2026-03-10)
 - Initial release
 - km360_gui.py: Main GUI application
@@ -798,6 +863,6 @@ This project is especially valuable for:
 
 ---
 
-*Document Version: 1.8*
-*Date: 2026-03-12*
+*Document Version: 2.0*
+*Date: 2026-03-17*
 *Authors: AI Assistant / Claude Code*

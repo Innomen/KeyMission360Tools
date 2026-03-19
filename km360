@@ -1,0 +1,1894 @@
+#!/usr/bin/env python3
+"""
+KeyMission 360 - Standalone CLI Tool
+=====================================
+
+A comprehensive command-line interface for the Nikon KeyMission 360 camera.
+Combines all functionality from the toolkit into a single command.
+
+Usage:
+    km360 info              # Show camera information
+    km360 format            # Format SD card via PTP
+    km360 time              # Sync camera time
+    km360 download          # Download files from camera
+    km360 reset             # Reset USB port
+    km360 viewer            # Launch 360° viewer
+    km360 youtube           # Inject 360° metadata for YouTube
+    km360 wifi              # Configure WiFi settings
+    km360 list              # List files on camera
+    km360 settings          # Camera settings
+    km360 install           # Install desktop entry
+
+Author: KeyMission 360 Tools Project
+License: MIT
+Version: 2.0
+"""
+
+import argparse
+import subprocess
+import sys
+import os
+import struct
+import json
+import tempfile
+import shutil
+import hashlib
+import time
+import math
+from pathlib import Path
+from datetime import datetime
+from typing import Optional, Tuple, List
+
+# Version info
+VERSION = "2.0"
+APP_NAME = "KeyMission 360 CLI"
+
+# USB IDs
+VENDOR_ID = 0x04b0
+PRODUCT_ID = 0x019f
+
+# PTP Constants
+PTP_CONTAINER_COMMAND = 0x0001
+PTP_CONTAINER_DATA = 0x0002
+PTP_CONTAINER_RESPONSE = 0x0003
+PTP_OC_OPEN_SESSION = 0x1002
+PTP_OC_GET_STORAGE_IDS = 0x1004
+PTP_OC_FORMAT_STORE = 0x100F
+PTP_RC_OK = 0x2001
+
+# Optional imports
+try:
+    import usb1
+    USB1_AVAILABLE = True
+except ImportError:
+    USB1_AVAILABLE = False
+
+try:
+    import usb.core
+    import usb.util
+    PYUSB_AVAILABLE = True
+except ImportError:
+    PYUSB_AVAILABLE = False
+
+USB_AVAILABLE = USB1_AVAILABLE or PYUSB_AVAILABLE
+
+
+def format_size_bytes(size):
+    """Format bytes to human readable string"""
+    if size is None:
+        return "Unknown"
+    for unit in ['B', 'KB', 'MB', 'GB']:
+        if size < 1024:
+            return f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} TB"
+
+
+def check_gphoto2():
+    """Check if gphoto2 is installed"""
+    try:
+        result = subprocess.run(
+            ["gphoto2", "--version"],
+            capture_output=True, text=True, timeout=5
+        )
+        return result.returncode == 0
+    except:
+        return False
+
+
+def detect_camera():
+    """Check if KeyMission 360 is connected"""
+    try:
+        result = subprocess.run(
+            ["gphoto2", "--auto-detect"],
+            capture_output=True, text=True, timeout=10
+        )
+        return "KeyMission" in result.stdout or "04b0" in result.stdout
+    except:
+        return False
+
+
+# =============================================================================
+# INFO Command
+# =============================================================================
+
+def cmd_info(args):
+    """Show camera information"""
+    print("=" * 60)
+    print("Nikon KeyMission 360 Camera Information")
+    print("=" * 60)
+    print()
+    
+    if not USB1_AVAILABLE:
+        print("[!] usb1 module not installed. Using gphoto2 fallback.")
+        print("    Install with: pip install libusb1")
+        print()
+        return _info_gphoto2()
+    
+    try:
+        with usb1.USBContext() as context:
+            device = None
+            for dev in context.getDeviceIterator(skip_on_error=True):
+                if dev.getVendorID() == VENDOR_ID and dev.getProductID() == PRODUCT_ID:
+                    device = dev
+                    break
+            
+            if not device:
+                print("[!] Camera not found via USB!")
+                print("    Trying gphoto2 fallback...")
+                print()
+                return _info_gphoto2()
+            
+            # USB Device Information
+            print("USB Device Information:")
+            print("-" * 60)
+            print(f"  Vendor ID:      0x{device.getVendorID():04X}")
+            print(f"  Product ID:     0x{device.getProductID():04X}")
+            print(f"  Bus:            {device.getBusNumber()}")
+            print(f"  Device Address: {device.getDeviceAddress()}")
+            
+            # String descriptors
+            print()
+            print("Device Strings:")
+            print("-" * 60)
+            try:
+                print(f"  Manufacturer:   {device.getStringDescriptor(device.device_descriptor.iManufacturer, 0x0409)}")
+                print(f"  Product:        {device.getStringDescriptor(device.device_descriptor.iProduct, 0x0409)}")
+                print(f"  Serial Number:  {device.getStringDescriptor(device.device_descriptor.iSerialNumber, 0x0409)}")
+            except Exception as e:
+                print(f"  Error reading strings: {e}")
+            
+            # PTP Communication
+            print()
+            print("PTP Communication:")
+            print("-" * 60)
+            
+            handle = device.open()
+            handle.setConfiguration(1)
+            
+            for i in range(4):
+                try:
+                    if handle.kernelDriverActive(i):
+                        handle.detachKernelDriver(i)
+                except:
+                    pass
+            
+            config = device[0]
+            setting = next(config[0].iterSettings())
+            interface_num = setting.getNumber()
+            handle.claimInterface(interface_num)
+            
+            bulk_in = bulk_out = None
+            for ep in setting.iterEndpoints():
+                addr = ep.getAddress()
+                attrs = ep.getAttributes()
+                if (attrs & 0x03) == 0x02:
+                    if addr & 0x80:
+                        bulk_in = addr
+                    else:
+                        bulk_out = addr
+            
+            print(f"  Interface:      {interface_num}")
+            print(f"  Bulk OUT:       0x{bulk_out:02X}")
+            print(f"  Bulk IN:        0x{bulk_in:02X}")
+            
+            # Get storage IDs
+            trans_id = 1
+            session = struct.pack('<IHHII', 16, PTP_CONTAINER_COMMAND, PTP_OC_OPEN_SESSION, trans_id, 1)
+            handle.bulkWrite(bulk_out, session, timeout=5000)
+            handle.bulkRead(bulk_in, 512, timeout=5000)
+            
+            trans_id += 1
+            storage_cmd = struct.pack('<IHHII', 16, PTP_CONTAINER_COMMAND, PTP_OC_GET_STORAGE_IDS, trans_id, 0)
+            handle.bulkWrite(bulk_out, storage_cmd, timeout=5000)
+            
+            data = handle.bulkRead(bulk_in, 512, timeout=5000)
+            handle.bulkRead(bulk_in, 512, timeout=5000)
+            
+            print()
+            print("Storage Devices:")
+            print("-" * 60)
+            
+            if len(data) >= 12:
+                count = struct.unpack('<I', bytes(data[8:12]))[0]
+                print(f"  Count: {count}")
+                
+                for i in range(count):
+                    offset = 12 + (i * 4)
+                    if offset + 4 <= len(data):
+                        storage_id = struct.unpack('<I', bytes(data[offset:offset+4]))[0]
+                        name = "(Internal)" if storage_id == 0x00000001 else "(SD Card)" if storage_id == 0x00010001 else ""
+                        print(f"  Storage {i+1}:       0x{storage_id:08x} {name}")
+            
+            handle.releaseInterface(interface_num)
+            
+    except Exception as e:
+        print(f"[!] USB Error: {e}")
+        print("    Trying gphoto2 fallback...")
+        print()
+        return _info_gphoto2()
+    
+    print()
+    print("=" * 60)
+    return 0
+
+
+def _info_gphoto2():
+    """Fallback info using gphoto2"""
+    if not check_gphoto2():
+        print("[!] gphoto2 not installed!")
+        return 1
+    
+    try:
+        result = subprocess.run(
+            ["gphoto2", "--summary"],
+            capture_output=True, text=True, timeout=30
+        )
+        print(result.stdout)
+        if result.stderr:
+            print("Errors:", result.stderr)
+    except Exception as e:
+        print(f"[!] Error: {e}")
+        return 1
+    
+    return 0
+
+
+# =============================================================================
+# FORMAT Command
+# =============================================================================
+
+class PTPError(Exception):
+    pass
+
+
+class KeyMission360Formatter:
+    def __init__(self):
+        self.handle = None
+        self.device = None
+        self.bulk_in = None
+        self.bulk_out = None
+        self.interface_num = 0
+        self.transaction_id = 0
+    
+    def find_camera(self) -> bool:
+        context = usb1.USBContext()
+        for device in context.getDeviceIterator(skip_on_error=True):
+            if device.getVendorID() == VENDOR_ID and device.getProductID() == PRODUCT_ID:
+                print(f"[✓] Found Nikon KeyMission 360 at Bus {device.getBusNumber()} Device {device.getDeviceAddress()}")
+                self.device = device
+                self.handle = device.open()
+                return True
+        return False
+    
+    def setup_usb(self):
+        if not self.handle:
+            raise PTPError("Camera not opened")
+        
+        self.handle.setConfiguration(1)
+        
+        for i in range(4):
+            try:
+                if self.handle.kernelDriverActive(i):
+                    self.handle.detachKernelDriver(i)
+            except:
+                pass
+        
+        config = self.device[0]
+        interface = config[0]
+        setting = next(interface.iterSettings())
+        self.interface_num = setting.getNumber()
+        
+        self.handle.claimInterface(self.interface_num)
+        
+        for ep in setting.iterEndpoints():
+            addr = ep.getAddress()
+            attrs = ep.getAttributes()
+            if (attrs & 0x03) == 0x02:
+                if addr & 0x80:
+                    self.bulk_in = addr
+                else:
+                    self.bulk_out = addr
+        
+        if not self.bulk_in or not self.bulk_out:
+            raise PTPError("Could not find bulk endpoints")
+    
+    def send_ptp_command(self, opcode: int, params: Tuple[int, ...] = (), data_phase: bool = False):
+        self.transaction_id += 1
+        length = 12 + (4 * len(params))
+        packet = struct.pack('<IHH', length, PTP_CONTAINER_COMMAND, opcode)
+        packet += struct.pack('<I', self.transaction_id)
+        for param in params:
+            packet += struct.pack('<I', param)
+        
+        self.handle.bulkWrite(self.bulk_out, packet, timeout=5000)
+        
+        if data_phase:
+            data = self.handle.bulkRead(self.bulk_in, 512, timeout=5000)
+            resp = self.handle.bulkRead(self.bulk_in, 512, timeout=5000)
+            return data, resp
+        else:
+            resp = self.handle.bulkRead(self.bulk_in, 512, timeout=5000)
+            return resp
+    
+    def parse_response(self, response: bytes) -> Tuple[int, int]:
+        if len(response) < 8:
+            raise PTPError(f"Response too short: {len(response)} bytes")
+        resp_type = struct.unpack('<H', bytes(response[4:6]))[0]
+        resp_code = struct.unpack('<H', bytes(response[6:8]))[0]
+        resp_trans = struct.unpack('<I', bytes(response[8:12]))[0]
+        return resp_code, resp_trans
+    
+    def open_session(self) -> bool:
+        print("\n[+] Opening PTP session...")
+        resp = self.send_ptp_command(PTP_OC_OPEN_SESSION, (1,))
+        code, _ = self.parse_response(resp)
+        if code == PTP_RC_OK or code == 0x201E:
+            print(f"[✓] Session opened (code: 0x{code:04x})")
+            return True
+        else:
+            print(f"[!] Failed to open session: 0x{code:04x}")
+            return False
+    
+    def get_storage_ids(self) -> List[int]:
+        print("\n[+] Querying storage devices...")
+        data, resp = self.send_ptp_command(PTP_OC_GET_STORAGE_IDS, data_phase=True)
+        code, _ = self.parse_response(resp)
+        if code != PTP_RC_OK:
+            print(f"[!] Failed to get storage IDs: 0x{code:04x}")
+            return []
+        
+        if len(data) < 12:
+            print("[!] Invalid data response")
+            return []
+        
+        count = struct.unpack('<I', bytes(data[8:12]))[0]
+        print(f"[*] Found {count} storage device(s)")
+        
+        storage_ids = []
+        for i in range(count):
+            offset = 12 + (i * 4)
+            if offset + 4 <= len(data):
+                storage_id = struct.unpack('<I', bytes(data[offset:offset+4]))[0]
+                storage_ids.append(storage_id)
+                name = "(Internal)" if storage_id == 0x00000001 else "(SD Card)" if storage_id == 0x00010001 else ""
+                print(f"    Storage {i+1}: 0x{storage_id:08x} {name}")
+        
+        return storage_ids
+    
+    def format_storage(self, storage_id: int, force: bool = False) -> bool:
+        print(f"\n[+] Formatting storage 0x{storage_id:08x}...")
+        
+        if not force:
+            print("[!] WARNING: This will erase ALL data on the memory card!")
+            response = input("    Type 'YES' to proceed: ")
+            if response != "YES":
+                print("[x] Aborted")
+                return False
+        
+        print("[*] Sending FormatStore command...")
+        print("[*] This may take several seconds...")
+        
+        resp = self.send_ptp_command(PTP_OC_FORMAT_STORE, (storage_id,))
+        code, _ = self.parse_response(resp)
+        
+        if code == PTP_RC_OK:
+            print(f"[✓] Format completed successfully!")
+            return True
+        elif code == 0x2008:
+            print(f"[!] Invalid storage ID: 0x{storage_id:08x}")
+        elif code == 0x201D:
+            print(f"[!] Invalid parameter")
+        elif code == 0x2019:
+            print(f"[!] Device is busy")
+        else:
+            print(f"[!] Format failed: 0x{code:04x}")
+        
+        return False
+    
+    def close(self):
+        if self.handle:
+            try:
+                self.handle.releaseInterface(self.interface_num)
+            except:
+                pass
+    
+    def run(self, storage_id: Optional[int] = None, force: bool = False) -> bool:
+        try:
+            if not self.find_camera():
+                print("[!] Camera not found! Make sure it's connected via USB.")
+                return False
+            
+            self.setup_usb()
+            
+            if not self.open_session():
+                return False
+            
+            if storage_id is None:
+                storage_ids = self.get_storage_ids()
+                
+                if not storage_ids:
+                    print("[!] No storage devices found")
+                    return False
+                
+                if 0x00010001 in storage_ids:
+                    storage_id = 0x00010001
+                    print(f"[*] Auto-selected memory card: 0x{storage_id:08x}")
+                else:
+                    storage_id = storage_ids[0]
+                    print(f"[*] Auto-selected storage: 0x{storage_id:08x}")
+            
+            return self.format_storage(storage_id, force)
+            
+        except Exception as e:
+            print(f"[!] Error: {e}")
+            return False
+        finally:
+            self.close()
+
+
+def cmd_format(args):
+    """Format SD card via PTP"""
+    print("=" * 60)
+    print("Nikon KeyMission 360 Memory Card Formatter")
+    print("=" * 60)
+    print()
+    
+    if not USB1_AVAILABLE:
+        print("[!] usb1 module not installed!")
+        print("    Install with: pip install libusb1")
+        return 1
+    
+    formatter = KeyMission360Formatter()
+    
+    if args.list:
+        try:
+            if not formatter.find_camera():
+                print("[!] Camera not found!")
+                return 1
+            formatter.setup_usb()
+            formatter.open_session()
+            formatter.get_storage_ids()
+            formatter.close()
+            return 0
+        except Exception as e:
+            print(f"[!] Error: {e}")
+            return 1
+    
+    success = formatter.run(storage_id=args.storage, force=args.force)
+    return 0 if success else 1
+
+
+# =============================================================================
+# TIME Command
+# =============================================================================
+
+def get_camera_time():
+    """Get current camera date/time"""
+    try:
+        result = subprocess.run(
+            ["gphoto2", "--get-config=/main/settings/datetime"],
+            capture_output=True, text=True, timeout=10
+        )
+        for line in result.stdout.split('\n'):
+            if 'Printable:' in line:
+                return line.split(':', 1)[1].strip()
+        return None
+    except:
+        return None
+
+
+def set_camera_time():
+    """Set camera time to current system time"""
+    try:
+        result = subprocess.run(
+            ["gphoto2", "--set-config", "datetime=now"],
+            capture_output=True, text=True, timeout=10
+        )
+        return result.returncode == 0
+    except:
+        return False
+
+
+def cmd_time(args):
+    """Sync camera time"""
+    print("=" * 60)
+    print("Nikon KeyMission 360 Time Synchronization")
+    print("=" * 60)
+    print()
+    
+    if not check_gphoto2():
+        print("[!] Error: gphoto2 is not installed!")
+        print("    Install with: sudo apt-get install gphoto2")
+        return 1
+    
+    if not detect_camera():
+        print("[!] Camera not found!")
+        print("    Make sure the camera is connected via USB and powered on.")
+        return 1
+    
+    print("[✓] KeyMission 360 detected")
+    print()
+    
+    camera_time = get_camera_time()
+    if camera_time:
+        print(f"[*] Camera time: {camera_time}")
+    else:
+        print("[!] Could not read camera time")
+    
+    if args.check:
+        print(f"\nCurrent camera time: {camera_time or 'Unknown'}")
+        return 0
+    
+    system_time = datetime.now().strftime("%a %d %b %Y %I:%M:%S %p")
+    print(f"[*] System time:   {system_time}")
+    print()
+    
+    if set_camera_time():
+        print("[✓] Time synchronized successfully!")
+        print()
+        
+        new_camera_time = get_camera_time()
+        if new_camera_time:
+            print(f"[✓] New camera time: {new_camera_time}")
+        
+        print("=" * 60)
+        print("Time sync complete. Your photos will now have")
+        print("the correct timestamp.")
+        print("=" * 60)
+        return 0
+    else:
+        print("[!] Failed to set camera time!")
+        return 1
+
+
+# =============================================================================
+# LIST Command
+# =============================================================================
+
+def cmd_list(args):
+    """List files on camera"""
+    print("=" * 60)
+    print("Nikon KeyMission 360 - File List")
+    print("=" * 60)
+    print()
+    
+    if not check_gphoto2():
+        print("[!] gphoto2 not installed!")
+        return 1
+    
+    if not detect_camera():
+        print("[!] Camera not found!")
+        return 1
+    
+    try:
+        result = subprocess.run(
+            ["gphoto2", "--list-files"],
+            capture_output=True, text=True, timeout=30
+        )
+        
+        lines = result.stdout.strip().split('\n')
+        files = []
+        
+        for line in lines:
+            if line.strip().startswith('#'):
+                parts = line.strip().split()
+                if len(parts) >= 3:
+                    num = parts[0][1:]
+                    name = parts[1]
+                    size = parts[2]
+                    files.append((num, name, size))
+        
+        if not files:
+            print("No files found on camera.")
+            return 0
+        
+        print(f"Found {len(files)} file(s):\n")
+        print(f"{'Num':<6} {'Name':<30} {'Size':<10}")
+        print("-" * 60)
+        
+        for num, name, size in files:
+            print(f"#{num:<5} {name:<30} {size:<10}")
+        
+        return 0
+        
+    except Exception as e:
+        print(f"[!] Error: {e}")
+        return 1
+
+
+# =============================================================================
+# DOWNLOAD Command
+# =============================================================================
+
+def get_file_info(file_num):
+    """Get file info from camera"""
+    try:
+        result = subprocess.run(
+            ["gphoto2", "--list-files"],
+            capture_output=True, text=True, timeout=30
+        )
+        for line in result.stdout.split('\n'):
+            if line.strip().startswith(f'#{file_num}'):
+                parts = line.strip().split()
+                if len(parts) >= 3:
+                    return parts[1], parts[2]
+    except:
+        pass
+    return None, None
+
+
+def parse_size(size_str):
+    """Parse size string like '12MB' to bytes"""
+    size_str = size_str.upper()
+    multipliers = {'B': 1, 'KB': 1024, 'MB': 1024**2, 'GB': 1024**3}
+    for suffix, mult in multipliers.items():
+        if size_str.endswith(suffix):
+            try:
+                return int(float(size_str[:-len(suffix)]) * mult)
+            except:
+                return None
+    try:
+        return int(size_str)
+    except:
+        return None
+
+
+def calculate_checksum(filepath):
+    """Calculate SHA256 checksum"""
+    sha256_hash = hashlib.sha256()
+    try:
+        with open(filepath, "rb") as f:
+            for byte_block in iter(lambda: f.read(4096), b""):
+                sha256_hash.update(byte_block)
+        return sha256_hash.hexdigest()
+    except:
+        return None
+
+
+def download_file(file_num, output_path, max_retries=3, verify=True, show_progress=True, inject_metadata=True):
+    """Download a file from camera"""
+    name, size_str = get_file_info(file_num)
+    if not name:
+        return False, "Could not get file info from camera", None
+    
+    camera_size = parse_size(size_str) if size_str else None
+    
+    if show_progress:
+        print(f"Downloading: {name}")
+        print(f"Expected size: {format_size_bytes(camera_size)}")
+    
+    # Check if output file already exists and is complete
+    if os.path.exists(output_path):
+        existing_size = os.path.getsize(output_path)
+        if camera_size and existing_size == camera_size:
+            if verify:
+                if show_progress:
+                    print("File exists, verifying...")
+                checksum = calculate_checksum(output_path)
+                if checksum:
+                    return True, "File already exists and verified", checksum
+            else:
+                return True, "File already exists", None
+    
+    temp_path = output_path + ".partial"
+    
+    for attempt in range(max_retries):
+        if show_progress and attempt > 0:
+            print(f"Retry attempt {attempt + 1}/{max_retries}...")
+        
+        try:
+            if attempt > 0 and os.path.exists(temp_path):
+                os.remove(temp_path)
+            
+            result = subprocess.run(
+                ["gphoto2", "--get-file", str(file_num), f"--filename={temp_path}"],
+                capture_output=True, timeout=300
+            )
+            
+            if result.returncode == 0:
+                if not os.path.exists(temp_path):
+                    last_error = "Download completed but temp file not found"
+                    continue
+                
+                downloaded_size = os.path.getsize(temp_path)
+                if camera_size and downloaded_size != camera_size:
+                    last_error = f"Size mismatch: {downloaded_size} vs {camera_size}"
+                    continue
+                
+                shutil.move(temp_path, output_path)
+                
+                # Inject 360 metadata for videos
+                is_video = name.lower().endswith(('.mp4', '.mov', '.avi'))
+                if is_video and inject_metadata:
+                    if show_progress:
+                        print("Injecting 360° metadata for YouTube...")
+                    _inject_metadata(output_path)
+                
+                if verify:
+                    if show_progress:
+                        print("Verifying checksum...")
+                    checksum = calculate_checksum(output_path)
+                    if checksum:
+                        return True, "Download successful and verified", checksum
+                    else:
+                        last_error = "Checksum verification failed"
+                        continue
+                else:
+                    return True, "Download successful", None
+            else:
+                stderr = result.stderr.decode() if result.stderr else "Unknown error"
+                last_error = f"gphoto2 error: {stderr}"
+                if "timeout" in stderr.lower():
+                    time.sleep(2 ** attempt)
+                    continue
+                else:
+                    break
+                    
+        except subprocess.TimeoutExpired:
+            last_error = "Download timeout"
+            time.sleep(2 ** attempt)
+            continue
+        except Exception as e:
+            last_error = f"Exception: {str(e)}"
+            continue
+    
+    if os.path.exists(temp_path):
+        try:
+            os.remove(temp_path)
+        except:
+            pass
+    
+    return False, f"Failed after {max_retries} attempts: {last_error}", None
+
+
+def _inject_metadata(input_file):
+    """Inject 360° metadata for YouTube"""
+    try:
+        temp_output = input_file + ".yt_temp.mp4"
+        cmd = [
+            "ffmpeg", "-y", "-i", input_file,
+            "-c", "copy",
+            "-movflags", "+faststart",
+            "-metadata:s:v:0", "spherical=1",
+            "-metadata:s:v:0", "stereo_mode=mono",
+            temp_output
+        ]
+        result = subprocess.run(cmd, capture_output=True, timeout=120)
+        if result.returncode == 0:
+            os.replace(temp_output, input_file)
+            return True
+        else:
+            if os.path.exists(temp_output):
+                os.remove(temp_output)
+    except:
+        pass
+    return False
+
+
+def cmd_download(args):
+    """Download files from camera"""
+    print("=" * 60)
+    print("Nikon KeyMission 360 - Download Tool")
+    print("=" * 60)
+    print()
+    
+    if not check_gphoto2():
+        print("[!] gphoto2 not installed!")
+        return 1
+    
+    if not detect_camera():
+        print("[!] Camera not found!")
+        return 1
+    
+    output_dir = args.output or "."
+    os.makedirs(output_dir, exist_ok=True)
+    
+    if args.all:
+        # Download all files
+        result = subprocess.run(
+            ["gphoto2", "--list-files"],
+            capture_output=True, text=True, timeout=30
+        )
+        
+        files = []
+        for line in result.stdout.split('\n'):
+            if line.strip().startswith('#'):
+                parts = line.strip().split()
+                if len(parts) >= 2:
+                    num = int(parts[0][1:])
+                    name = parts[1]
+                    files.append((num, name))
+        
+        if not files:
+            print("No files found on camera.")
+            return 0
+        
+        print(f"Found {len(files)} files to download.\n")
+        
+        success_count = 0
+        failed_files = []
+        
+        for i, (num, name) in enumerate(files, 1):
+            print(f"[{i}/{len(files)}] ", end="")
+            output_path = os.path.join(output_dir, name)
+            
+            success, message, checksum = download_file(
+                num, output_path, 
+                max_retries=args.retries,
+                verify=not args.no_verify,
+                show_progress=False,
+                inject_metadata=not args.no_metadata
+            )
+            
+            if success:
+                print(f"✓ {name} - {message}")
+                success_count += 1
+            else:
+                print(f"✗ {name} - {message}")
+                failed_files.append((name, message))
+        
+        print(f"\n{'='*50}")
+        print(f"Complete: {success_count}/{len(files)} files")
+        
+        if failed_files:
+            print(f"\nFailed files:")
+            for name, error in failed_files:
+                print(f"  • {name}: {error}")
+        
+        return 0 if not failed_files else 1
+    
+    elif args.file_num:
+        # Download single file
+        name, _ = get_file_info(args.file_num)
+        if not name:
+            print(f"[!] File #{args.file_num} not found on camera")
+            return 1
+        
+        output_path = args.output or name
+        if os.path.isdir(output_path):
+            output_path = os.path.join(output_path, name)
+        
+        success, message, checksum = download_file(
+            args.file_num, output_path,
+            max_retries=args.retries,
+            verify=not args.no_verify,
+            show_progress=True,
+            inject_metadata=not args.no_metadata
+        )
+        
+        print(f"\n{message}")
+        return 0 if success else 1
+    
+    else:
+        print("[!] Please specify a file number or use --all")
+        return 1
+
+
+# =============================================================================
+# RESET Command
+# =============================================================================
+
+def find_usb_camera():
+    """Find camera USB device"""
+    if USB1_AVAILABLE:
+        try:
+            context = usb1.USBContext()
+            for device in context.getDeviceIterator(skip_on_error=True):
+                if device.getVendorID() == VENDOR_ID and device.getProductID() == PRODUCT_ID:
+                    return device.getBusNumber(), device.getDeviceAddress()
+        except:
+            pass
+    
+    if PYUSB_AVAILABLE:
+        try:
+            dev = usb.core.find(idVendor=VENDOR_ID, idProduct=PRODUCT_ID)
+            if dev:
+                return 0, 0
+        except:
+            pass
+    
+    return None, None
+
+
+def cmd_reset(args):
+    """Reset USB port"""
+    print("=" * 50)
+    print("KeyMission 360 USB Port Reset")
+    print("=" * 50)
+    
+    bus, addr = find_usb_camera()
+    
+    if bus is None:
+        print("\n⚠ Camera not found on USB bus.")
+        print("   Make sure the camera is connected and powered on.")
+        return 1
+    
+    print(f"\nFound camera at Bus {bus}, Address {addr}")
+    
+    if not args.force:
+        response = input("\nReset USB port? This will briefly disconnect the camera. [y/N]: ")
+        if response.lower() != 'y':
+            print("Cancelled.")
+            return 0
+    
+    print("\nAttempting USB reset...")
+    
+    # Try pyusb reset
+    if PYUSB_AVAILABLE:
+        try:
+            dev = usb.core.find(idVendor=VENDOR_ID, idProduct=PRODUCT_ID)
+            if dev:
+                dev.reset()
+                print("\n✓ USB device reset successful!")
+                print("  Wait a few seconds for the camera to reconnect.")
+                return 0
+        except Exception as e:
+            print(f"pyusb reset failed: {e}")
+    
+    # Try usbreset command
+    if bus and addr:
+        try:
+            usbdev = f"/dev/bus/usb/{bus:03d}/{addr:03d}"
+            result = subprocess.run(
+                ["usbreset", usbdev],
+                capture_output=True, text=True, timeout=10
+            )
+            if result.returncode == 0:
+                print("\n✓ USB device reset successful!")
+                print("  Wait a few seconds for the camera to reconnect.")
+                return 0
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            print(f"usbreset failed: {e}")
+    
+    # Try sysfs authorized toggle
+    if bus and addr:
+        try:
+            result = subprocess.run(
+                ["find", "/sys/bus/usb/devices", "-name", f"*:{addr}"],
+                capture_output=True, text=True, timeout=5
+            )
+            for path in result.stdout.strip().split('\n'):
+                if path:
+                    auth_path = path + "/authorized"
+                    try:
+                        with open(auth_path, 'w') as f:
+                            f.write('0')
+                        with open(auth_path, 'w') as f:
+                            f.write('1')
+                        print("\n✓ USB device reset successful (authorized toggle)!")
+                        print("  Wait a few seconds for the camera to reconnect.")
+                        return 0
+                    except PermissionError:
+                        print(f"Permission denied on {auth_path}, try with sudo")
+                    except Exception as e:
+                        print(f"Error toggling authorized: {e}")
+        except Exception as e:
+            print(f"auth_unbind failed: {e}")
+    
+    print("\n✗ Automatic reset failed.")
+    print("\nManual reset options:")
+    print("  1. Unplug and replug the USB cable")
+    if bus and addr:
+        print(f"  2. Run: sudo usbreset /dev/bus/usb/{bus:03d}/{addr:03d}")
+    print("  3. Run this command with sudo")
+    
+    return 1
+
+
+# =============================================================================
+# VIEWER Command
+# =============================================================================
+
+def cmd_viewer(args):
+    """Launch 360° viewer"""
+    try:
+        import numpy as np
+        from PIL import Image, ImageTk
+        import tkinter as tk
+        from tkinter import ttk
+    except ImportError as e:
+        print(f"[!] Missing dependency: {e}")
+        print("    Install with: pip install numpy pillow")
+        return 1
+    
+    try:
+        import cv2
+        VIDEO_SUPPORT = True
+    except ImportError:
+        VIDEO_SUPPORT = False
+    
+    class EquirectangularProjector:
+        def __init__(self, width=800, height=600, fov=90):
+            self.width = width
+            self.height = height
+            self.fov = math.radians(fov)
+            self.yaw = 0
+            self.pitch = 0
+        
+        def rotate(self, delta_yaw, delta_pitch):
+            self.yaw += delta_yaw
+            self.pitch += delta_pitch
+            self.pitch = max(-math.pi/2 + 0.01, min(math.pi/2 - 0.01, self.pitch))
+        
+        def zoom(self, factor):
+            self.fov *= factor
+            self.fov = max(math.radians(30), min(math.radians(120), self.fov))
+        
+        def project(self, eq_img):
+            if isinstance(eq_img, Image.Image):
+                eq_array = np.array(eq_img)
+            else:
+                eq_array = eq_img
+            
+            eq_h, eq_w = eq_array.shape[:2]
+            out = np.zeros((self.height, self.width, 3), dtype=np.uint8)
+            
+            f = (self.width / 2) / math.tan(self.fov / 2)
+            cx, cy = self.width / 2, self.height / 2
+            
+            cos_yaw, sin_yaw = math.cos(self.yaw), math.sin(self.yaw)
+            cos_pitch, sin_pitch = math.cos(self.pitch), math.sin(self.pitch)
+            
+            x_coords = np.arange(self.width) - cx
+            y_coords = np.arange(self.height) - cy
+            xv, yv = np.meshgrid(x_coords, y_coords)
+            
+            z = np.full_like(xv, f, dtype=np.float32)
+            x = xv.astype(np.float32)
+            y = yv.astype(np.float32)
+            
+            norm = np.sqrt(x*x + y*y + z*z)
+            x, y, z = x/norm, y/norm, z/norm
+            
+            y_rot = y * cos_pitch - z * sin_pitch
+            z_rot = y * sin_pitch + z * cos_pitch
+            y, z = y_rot, z_rot
+            
+            x_rot = x * cos_yaw - z * sin_yaw
+            z_rot = x * sin_yaw + z * cos_yaw
+            x, z = x_rot, z_rot
+            
+            theta = np.arctan2(x, z)
+            phi = np.arcsin(y)
+            
+            eq_x = ((theta / math.pi + 1) / 2 * (eq_w - 1)).astype(np.int32)
+            eq_y = ((-phi / (math.pi/2) + 1) / 2 * (eq_h - 1)).astype(np.int32)
+            
+            eq_x = np.clip(eq_x, 0, eq_w - 1)
+            eq_y = np.clip(eq_y, 0, eq_h - 1)
+            
+            out = eq_array[eq_y, eq_x]
+            return Image.fromarray(out)
+    
+    class Viewer360:
+        def __init__(self, root, file_path=None):
+            self.root = root
+            self.root.title("KeyMission 360 Viewer")
+            self.root.geometry("1000x700")
+            
+            self.file_path = file_path
+            self.is_video = False
+            self.video_capture = None
+            self.current_frame = None
+            self.playing = False
+            self.projector = EquirectangularProjector(width=800, height=600)
+            
+            self.dragging = False
+            self.last_x = 0
+            self.last_y = 0
+            self.sensitivity = 0.005
+            
+            self.setup_ui()
+            
+            if file_path:
+                self.load_file(file_path)
+            
+            self.bind_controls()
+            self.update()
+        
+        def setup_ui(self):
+            main_frame = ttk.Frame(self.root)
+            main_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+            
+            self.canvas = tk.Canvas(main_frame, width=800, height=600, bg='black')
+            self.canvas.pack(fill=tk.BOTH, expand=True)
+            
+            controls = ttk.Frame(main_frame)
+            controls.pack(fill=tk.X, pady=5)
+            
+            ttk.Button(controls, text="Open File", command=self.open_file).pack(side=tk.LEFT, padx=5)
+            self.play_btn = ttk.Button(controls, text="Play", command=self.toggle_play)
+            self.play_btn.pack(side=tk.LEFT, padx=5)
+            self.play_btn.config(state=tk.DISABLED)
+            ttk.Button(controls, text="Reset View", command=self.reset_view).pack(side=tk.LEFT, padx=5)
+            
+            status = ttk.Label(self.root, text="Drag to look • Scroll to zoom • Arrows/WASD to look • +/- to zoom • R to reset • Q to quit",
+                              relief=tk.SUNKEN, anchor=tk.W)
+            status.pack(side=tk.BOTTOM, fill=tk.X)
+        
+        def bind_controls(self):
+            self.canvas.bind("<Button-1>", self.on_mouse_down)
+            self.canvas.bind("<B1-Motion>", self.on_mouse_drag)
+            self.canvas.bind("<ButtonRelease-1>", self.on_mouse_up)
+            self.canvas.bind("<MouseWheel>", self.on_scroll)
+            self.canvas.bind("<Button-4>", self.on_scroll)
+            self.canvas.bind("<Button-5>", self.on_scroll)
+            
+            self.root.bind("<Left>", lambda e: self.rotate(-0.1, 0))
+            self.root.bind("<Right>", lambda e: self.rotate(0.1, 0))
+            self.root.bind("<Up>", lambda e: self.rotate(0, 0.1))
+            self.root.bind("<Down>", lambda e: self.rotate(0, -0.1))
+            self.root.bind("<a>", lambda e: self.rotate(-0.1, 0))
+            self.root.bind("<d>", lambda e: self.rotate(0.1, 0))
+            self.root.bind("<w>", lambda e: self.rotate(0, 0.1))
+            self.root.bind("<s>", lambda e: self.rotate(0, -0.1))
+            self.root.bind("<plus>", lambda e: self.zoom(0.9))
+            self.root.bind("<minus>", lambda e: self.zoom(1.1))
+            self.root.bind("<r>", lambda e: self.reset_view())
+            self.root.bind("<R>", lambda e: self.reset_view())
+            self.root.bind("<q>", lambda e: self.root.quit())
+            self.root.bind("<Q>", lambda e: self.root.quit())
+            self.root.bind("<Escape>", lambda e: self.root.quit())
+            self.root.bind("<space>", lambda e: self.toggle_play())
+        
+        def load_file(self, path):
+            self.file_path = path
+            ext = path.lower().split('.')[-1]
+            
+            if ext in ['mp4', 'mov', 'avi']:
+                self.load_video(path)
+            else:
+                self.load_image(path)
+        
+        def load_image(self, path):
+            try:
+                self.current_frame = Image.open(path)
+                self.is_video = False
+                self.play_btn.config(state=tk.DISABLED)
+                self.render()
+            except Exception as e:
+                print(f"Error loading image: {e}")
+        
+        def load_video(self, path):
+            if not VIDEO_SUPPORT:
+                print("Video support not available. Install opencv-python")
+                return
+            
+            try:
+                if self.video_capture:
+                    self.video_capture.release()
+                
+                self.video_capture = cv2.VideoCapture(path)
+                self.is_video = True
+                self.playing = True
+                self.play_btn.config(state=tk.NORMAL, text="Pause")
+                
+                ret, frame = self.video_capture.read()
+                if ret:
+                    self.current_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    self.render()
+            except Exception as e:
+                print(f"Error loading video: {e}")
+        
+        def open_file(self):
+            from tkinter import filedialog
+            path = filedialog.askopenfilename(
+                title="Open 360° Image or Video",
+                filetypes=[
+                    ("360° Media", "*.jpg *.jpeg *.png *.mp4 *.mov *.avi"),
+                    ("Images", "*.jpg *.jpeg *.png"),
+                    ("Videos", "*.mp4 *.mov *.avi"),
+                    ("All Files", "*.*")
+                ]
+            )
+            if path:
+                self.load_file(path)
+        
+        def render(self):
+            if self.current_frame is None:
+                return
+            
+            projected = self.projector.project(self.current_frame)
+            self.tk_image = ImageTk.PhotoImage(projected)
+            
+            self.canvas.delete("all")
+            self.canvas.create_image(
+                self.canvas.winfo_width() // 2,
+                self.canvas.winfo_height() // 2,
+                image=self.tk_image
+            )
+        
+        def update(self):
+            if self.is_video and self.playing and self.video_capture:
+                ret, frame = self.video_capture.read()
+                if ret:
+                    self.current_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    self.render()
+                else:
+                    self.video_capture.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            
+            self.root.after(33, self.update)
+        
+        def on_mouse_down(self, event):
+            self.dragging = True
+            self.last_x = event.x
+            self.last_y = event.y
+        
+        def on_mouse_drag(self, event):
+            if not self.dragging:
+                return
+            dx = event.x - self.last_x
+            dy = event.y - self.last_y
+            self.rotate(dx * self.sensitivity, -dy * self.sensitivity)
+            self.last_x = event.x
+            self.last_y = event.y
+        
+        def on_mouse_up(self, event):
+            self.dragging = False
+        
+        def on_scroll(self, event):
+            if event.num == 4 or (hasattr(event, 'delta') and event.delta > 0):
+                self.zoom(0.9)
+            elif event.num == 5 or (hasattr(event, 'delta') and event.delta < 0):
+                self.zoom(1.1)
+        
+        def rotate(self, yaw_delta, pitch_delta):
+            self.projector.rotate(yaw_delta, pitch_delta)
+            self.render()
+        
+        def zoom(self, factor):
+            self.projector.zoom(factor)
+            self.render()
+        
+        def reset_view(self):
+            self.projector.yaw = 0
+            self.projector.pitch = 0
+            self.projector.fov = math.radians(90)
+            self.render()
+        
+        def toggle_play(self):
+            if not self.is_video:
+                return
+            self.playing = not self.playing
+            self.play_btn.config(text="Pause" if self.playing else "Play")
+    
+    root = tk.Tk()
+    app = Viewer360(root, args.file)
+    root.mainloop()
+    return 0
+
+
+# =============================================================================
+# YOUTUBE Command
+# =============================================================================
+
+def cmd_youtube(args):
+    """Inject 360° metadata for YouTube"""
+    print("=" * 60)
+    print("KeyMission 360 YouTube Export")
+    print("=" * 60)
+    print()
+    
+    if not args.input:
+        print("[!] Please specify an input file or directory")
+        return 1
+    
+    if args.batch:
+        # Batch process directory
+        video_exts = ['.mp4', '.mov', '.avi', '.mkv', '.m4v', '.3gp']
+        video_files = [f for f in Path(args.input).iterdir() 
+                      if f.suffix.lower() in video_exts]
+        
+        if not video_files:
+            print(f"No video files found in {args.input}")
+            return 0
+        
+        print(f"Found {len(video_files)} videos to process")
+        print()
+        
+        success_count = 0
+        tagged_count = 0
+        failed_count = 0
+        
+        for i, video_file in enumerate(video_files, 1):
+            print(f"[{i}/{len(video_files)}] Processing: {video_file.name}")
+            success, msg = _process_youtube_file(str(video_file), in_place=args.in_place)
+            if success:
+                if msg == "already_tagged":
+                    tagged_count += 1
+                else:
+                    success_count += 1
+            else:
+                failed_count += 1
+                print(f"  ✗ Failed: {msg}")
+            print()
+        
+        print(f"Done! {success_count} tagged, {tagged_count} already had tags, {failed_count} failed")
+        return 0 if failed_count == 0 else 1
+    
+    else:
+        # Single file
+        success, msg = _process_youtube_file(args.input, args.output, in_place=args.in_place)
+        if success:
+            print("\n✓ Export complete!")
+            print("\nUpload to YouTube and it will automatically recognize")
+            print("this as a 360° video with full spherical playback.")
+            return 0
+        else:
+            print(f"\n✗ Export failed: {msg}")
+            return 1
+
+
+def _process_youtube_file(input_file, output_file=None, in_place=False):
+    """Process a single video file for YouTube 360° metadata"""
+    input_path = Path(input_file)
+    
+    if not input_path.exists():
+        return False, f"File not found: {input_file}"
+    
+    if input_path.suffix.lower() not in ['.mp4', '.mov', '.avi', '.mkv', '.m4v', '.3gp']:
+        return False, f"Unsupported format: {input_path.suffix}"
+    
+    # Determine output path
+    if output_file is None:
+        if in_place:
+            output_file = input_file
+        else:
+            output_file = str(input_path.with_suffix('')) + "_youtube.mp4"
+    
+    # Check for exiftool first (preferred method)
+    exiftool_path = None
+    for path in ["exiftool", "/usr/bin/exiftool", "/usr/local/bin/exiftool"]:
+        try:
+            result = subprocess.run([path, "-ver"], capture_output=True, timeout=5)
+            if result.returncode == 0:
+                exiftool_path = path
+                break
+        except:
+            continue
+    
+    if exiftool_path and in_place:
+        # Use exiftool for in-place modification
+        try:
+            cmd = [
+                exiftool_path,
+                "-XMP-GSpherical:Spherical=true",
+                "-XMP-GSpherical:Stitched=true",
+                "-XMP-GSpherical:StitchingSoftware=KeyMission360Tools",
+                "-XMP-GSpherical:ProjectionType=equirectangular",
+                "-XMP-GSpherical:StereoMode=mono",
+                "-overwrite_original",
+                input_file
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            if result.returncode == 0:
+                print(f"  ✓ Metadata injected (exiftool)")
+                return True, "success"
+            else:
+                error_msg = result.stderr.strip() if result.stderr else "exiftool failed"
+                return False, error_msg
+        except Exception as e:
+            return False, str(e)
+    
+    # Fallback to ffmpeg (creates new file)
+    temp_output = output_file + ".temp.mp4" if output_file == input_file else output_file
+    
+    try:
+        cmd = [
+            "ffmpeg", "-y", "-i", input_file,
+            "-c", "copy",
+            "-movflags", "+faststart",
+            "-metadata:s:v:0", "spherical=1",
+            "-metadata:s:v:0", "stereo_mode=mono",
+            "-metadata:s:v:0", "projection_type=equirectangular",
+            temp_output
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        
+        if result.returncode == 0:
+            if temp_output != output_file:
+                shutil.move(temp_output, output_file)
+            print(f"  ✓ Metadata injected (ffmpeg)")
+            return True, "success"
+        else:
+            if os.path.exists(temp_output):
+                os.remove(temp_output)
+            return False, "ffmpeg failed"
+    except Exception as e:
+        return False, str(e)
+
+
+# =============================================================================
+# WIFI Command
+# =============================================================================
+
+def cmd_wifi(args):
+    """Configure WiFi settings"""
+    print("=" * 60)
+    print("Nikon KeyMission 360 WiFi Configuration")
+    print("=" * 60)
+    print()
+    
+    if not check_gphoto2():
+        print("[!] gphoto2 not installed!")
+        return 1
+    
+    if not detect_camera():
+        print("[!] Camera not found!")
+        return 1
+    
+    # Read current settings
+    try:
+        result = subprocess.run(
+            ["gphoto2", "--get-config", "/main/other/d338"],
+            capture_output=True, text=True, timeout=10
+        )
+        current_name = ""
+        for line in result.stdout.split('\n'):
+            if 'Current:' in line:
+                current_name = line.split(':', 1)[1].strip()
+                break
+        
+        result = subprocess.run(
+            ["gphoto2", "--get-config", "/main/other/d340"],
+            capture_output=True, text=True, timeout=10
+        )
+        current_pass = ""
+        for line in result.stdout.split('\n'):
+            if 'Current:' in line:
+                current_pass = line.split(':', 1)[1].strip()
+                break
+        
+        print(f"Current WiFi Name (SSID): {current_name}")
+        print(f"Current WiFi Password: {current_pass}")
+        print()
+    except:
+        pass
+    
+    if args.ssid:
+        print(f"Setting WiFi Name to: {args.ssid}")
+        try:
+            result = subprocess.run(
+                ["gphoto2", "--set-config", f"/main/other/d338={args.ssid}"],
+                capture_output=True, text=True, timeout=10
+            )
+            if result.returncode == 0:
+                print("[✓] WiFi Name set successfully")
+            else:
+                print(f"[!] Failed: {result.stderr}")
+                return 1
+        except Exception as e:
+            print(f"[!] Error: {e}")
+            return 1
+    
+    if args.password:
+        print(f"Setting WiFi Password to: {'*' * len(args.password)}")
+        try:
+            result = subprocess.run(
+                ["gphoto2", "--set-config", f"/main/other/d340={args.password}"],
+                capture_output=True, text=True, timeout=10
+            )
+            if result.returncode == 0:
+                print("[✓] WiFi Password set successfully")
+            else:
+                print(f"[!] Failed: {result.stderr}")
+                return 1
+        except Exception as e:
+            print(f"[!] Error: {e}")
+            return 1
+    
+    if args.channel:
+        print(f"Setting WiFi Channel to: {args.channel}")
+        try:
+            result = subprocess.run(
+                ["gphoto2", "--set-config", f"/main/other/d341={args.channel}"],
+                capture_output=True, text=True, timeout=10
+            )
+            if result.returncode == 0:
+                print("[✓] WiFi Channel set successfully")
+            else:
+                print(f"[!] Failed: {result.stderr}")
+                return 1
+        except Exception as e:
+            print(f"[!] Error: {e}")
+            return 1
+    
+    if not any([args.ssid, args.password, args.channel]):
+        print("Use --ssid, --password, or --channel to change settings")
+        print()
+        print("Examples:")
+        print("  km360 wifi --ssid MyCamera360")
+        print("  km360 wifi --password MyNewPass123")
+        print("  km360 wifi --ssid MyCamera --password MyPass --channel 6")
+    
+    return 0
+
+
+# =============================================================================
+# SETTINGS Command
+# =============================================================================
+
+def cmd_settings(args):
+    """Camera settings"""
+    print("=" * 60)
+    print("Nikon KeyMission 360 Camera Settings")
+    print("=" * 60)
+    print()
+    
+    if not check_gphoto2():
+        print("[!] gphoto2 not installed!")
+        return 1
+    
+    if not detect_camera():
+        print("[!] Camera not found!")
+        return 1
+    
+    # Show current settings
+    if args.show or not any([args.whitebalance, args.copyright, args.target]):
+        print("Current Settings:")
+        print("-" * 60)
+        
+        settings = [
+            ("datetime", "Date/Time"),
+            ("whitebalance", "White Balance"),
+            ("capturetarget", "Capture Target"),
+            ("/main/other/501f", "Copyright"),
+            ("/main/other/d338", "WiFi Name (SSID)"),
+        ]
+        
+        for config, name in settings:
+            try:
+                result = subprocess.run(
+                    ["gphoto2", "--get-config", config],
+                    capture_output=True, text=True, timeout=10
+                )
+                current = ""
+                for line in result.stdout.split('\n'):
+                    if 'Current:' in line:
+                        current = line.split(':', 1)[1].strip()
+                        break
+                print(f"  {name}: {current}")
+            except:
+                pass
+        
+        print()
+    
+    # Apply settings
+    if args.whitebalance is not None:
+        wb_map = {'auto': 0, 'daylight': 1, 'fluorescent': 2, 'tungsten': 3}
+        wb_value = wb_map.get(args.whitebalance.lower(), 0)
+        print(f"Setting White Balance to: {args.whitebalance}")
+        try:
+            subprocess.run(
+                ["gphoto2", "--set-config", f"whitebalance={wb_value}"],
+                capture_output=True, timeout=10
+            )
+            print("[✓] White Balance set")
+        except Exception as e:
+            print(f"[!] Failed: {e}")
+    
+    if args.copyright:
+        print(f"Setting Copyright to: {args.copyright}")
+        try:
+            subprocess.run(
+                ["gphoto2", "--set-config", f"/main/other/501f={args.copyright}"],
+                capture_output=True, timeout=10
+            )
+            print("[✓] Copyright set")
+        except Exception as e:
+            print(f"[!] Failed: {e}")
+    
+    if args.target is not None:
+        target_map = {'ram': 0, 'card': 1, 'sd': 1}
+        target_value = target_map.get(args.target.lower(), 1)
+        target_name = "Internal RAM" if target_value == 0 else "Memory Card"
+        print(f"Setting Capture Target to: {target_name}")
+        try:
+            subprocess.run(
+                ["gphoto2", "--set-config", f"capturetarget={target_value}"],
+                capture_output=True, timeout=10
+            )
+            print("[✓] Capture Target set")
+        except Exception as e:
+            print(f"[!] Failed: {e}")
+    
+    return 0
+
+
+# =============================================================================
+# INSTALL Command
+# =============================================================================
+
+def cmd_install(args):
+    """Install desktop entry"""
+    print("=" * 60)
+    print("KeyMission 360 Desktop Entry Installer")
+    print("=" * 60)
+    print()
+    
+    # Get directories
+    xdg_data_home = os.environ.get('XDG_DATA_HOME', Path.home() / '.local' / 'share')
+    user_apps_dir = Path(xdg_data_home) / 'applications'
+    user_icons_dir = Path(xdg_data_home) / 'icons' / 'hicolor' / '256x256' / 'apps'
+    
+    script_dir = Path(__file__).parent.absolute()
+    
+    # Create icon
+    print("Creating application icon...")
+    user_icons_dir.mkdir(parents=True, exist_ok=True)
+    icon_path = user_icons_dir / 'km360-utility.png'
+    
+    try:
+        from PIL import Image, ImageDraw
+        img = Image.new('RGBA', (256, 256), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        draw.ellipse([20, 40, 236, 216], fill='#1a1a2e', outline='#16213e', width=4)
+        draw.ellipse([60, 80, 196, 176], fill='#0f3460', outline='#e94560', width=3)
+        draw.ellipse([100, 110, 156, 146], fill='#e94560')
+        draw.rectangle([100, 25, 156, 45], fill='#16213e', outline='#0f3460', width=2)
+        img.save(icon_path)
+        print(f"  ✓ Icon created: {icon_path}")
+        icon_name = 'km360-utility'
+    except:
+        print("  ⚠ Using system default icon")
+        icon_name = 'camera-video'
+    
+    # Create desktop entry
+    print("\nCreating desktop entry...")
+    user_apps_dir.mkdir(parents=True, exist_ok=True)
+    desktop_path = user_apps_dir / 'km360-utility.desktop'
+    
+    # Use this script as the GUI launcher if km360_gui.py doesn't exist
+    gui_script = script_dir / 'km360_gui.py'
+    if gui_script.exists():
+        exec_line = f'python3 "{gui_script}"'
+    else:
+        exec_line = f'python3 "{Path(__file__)}" gui'
+    
+    desktop_content = f"""[Desktop Entry]
+Name=KeyMission 360 Utility
+Comment=Nikon KeyMission 360/170 Camera Manager for Linux
+Exec={exec_line}
+Type=Application
+Terminal=false
+Icon={icon_name}
+Categories=Graphics;Photography;AudioVideo;Video;
+Keywords=Camera;Nikon;360;Video;Photo;KeyMission;
+StartupNotify=true
+MimeType=image/jpeg;image/png;video/mp4;video/quicktime;
+"""
+    
+    try:
+        desktop_path.write_text(desktop_content)
+        desktop_path.chmod(0o755)
+        print(f"  ✓ Desktop entry created: {desktop_path}")
+    except Exception as e:
+        print(f"  ✗ Failed to create desktop entry: {e}")
+        return 1
+    
+    print()
+    print("=" * 60)
+    print("Installation successful!")
+    print()
+    print("You can now launch the KeyMission 360 Utility from:")
+    print("  • Application menu (search for 'KeyMission')")
+    print("  • Activities overview (GNOME)")
+    print("  • Alt+F2 run dialog")
+    
+    if args.remove:
+        # Remove mode
+        if desktop_path.exists():
+            desktop_path.unlink()
+            print(f"\nRemoved: {desktop_path}")
+        if icon_path.exists():
+            icon_path.unlink()
+            print(f"Removed: {icon_path}")
+        print("\nDesktop entry removed.")
+    
+    return 0
+
+
+# =============================================================================
+# GUI Command (fallback if km360_gui.py doesn't exist)
+# =============================================================================
+
+def cmd_gui(args):
+    """Launch GUI (placeholder - recommends installing full package)"""
+    print("=" * 60)
+    print("KeyMission 360 GUI")
+    print("=" * 60)
+    print()
+    
+    script_dir = Path(__file__).parent.absolute()
+    gui_script = script_dir / 'km360_gui.py'
+    
+    if gui_script.exists():
+        # Launch the full GUI
+        subprocess.run([sys.executable, str(gui_script)])
+        return 0
+    else:
+        print("The full GUI is not available in standalone mode.")
+        print()
+        print("This CLI tool provides all camera functionality:")
+        print("  km360 info        - Show camera info")
+        print("  km360 format      - Format SD card")
+        print("  km360 time        - Sync time")
+        print("  km360 list        - List files")
+        print("  km360 download    - Download files")
+        print("  km360 settings    - Configure settings")
+        print("  km360 wifi        - Configure WiFi")
+        print("  km360 reset       - Reset USB")
+        print("  km360 viewer      - View 360° media")
+        print("  km360 youtube     - YouTube export")
+        print()
+        print("Run 'km360 --help' for more information.")
+        return 0
+
+
+# =============================================================================
+# Main Entry Point
+# =============================================================================
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog='km360',
+        description=f"""
+KeyMission 360 - Comprehensive CLI Tool v{VERSION}
+
+A complete command-line interface for the Nikon KeyMission 360 camera.
+Provides camera control, file management, 360° viewing, and YouTube export.
+        """,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  km360 info                      # Show camera information
+  km360 format                    # Format SD card (with confirmation)
+  km360 format --force            # Format without confirmation
+  km360 time                      # Sync camera time to system time
+  km360 time --check              # Check current camera time
+  km360 list                      # List all files on camera
+  km360 download --all ~/Photos   # Download all files
+  km360 download 5 ~/video.mp4    # Download file #5
+  km360 reset                     # Reset USB port
+  km360 viewer photo.jpg          # View 360° image
+  km360 youtube video.mp4         # Add YouTube 360° metadata
+  km360 wifi --ssid MyCamera      # Change WiFi name
+  km360 settings --show           # Show all settings
+  km360 install                   # Add to application menu
+
+For detailed help on a command:
+  km360 <command> --help
+
+Requirements:
+  - gphoto2: sudo apt-get install gphoto2
+  - libusb1: pip install libusb1
+  - numpy, pillow: pip install numpy pillow (for viewer)
+  - opencv-python: pip install opencv-python (for video viewer)
+  - ffmpeg: sudo apt-get install ffmpeg (for YouTube export)
+
+License: MIT
+        """
+    )
+    
+    parser.add_argument('--version', '-v', action='version', version=f'%(prog)s {VERSION}')
+    
+    subparsers = parser.add_subparsers(dest='command', help='Available commands')
+    
+    # Info command
+    p_info = subparsers.add_parser('info', help='Show camera information')
+    p_info.set_defaults(func=cmd_info)
+    
+    # Format command
+    p_format = subparsers.add_parser('format', help='Format SD card via PTP')
+    p_format.add_argument('--storage', '-s', type=lambda x: int(x, 0),
+                         help='Specific storage ID (hex, e.g., 0x00010001)')
+    p_format.add_argument('--force', '-f', action='store_true',
+                         help='Skip confirmation (DANGEROUS)')
+    p_format.add_argument('--list', '-l', action='store_true',
+                         help='List storage devices only')
+    p_format.set_defaults(func=cmd_format)
+    
+    # Time command
+    p_time = subparsers.add_parser('time', help='Sync camera time')
+    p_time.add_argument('--check', '-c', action='store_true',
+                       help='Only check current time, don\'t change')
+    p_time.set_defaults(func=cmd_time)
+    
+    # List command
+    p_list = subparsers.add_parser('list', help='List files on camera')
+    p_list.set_defaults(func=cmd_list)
+    
+    # Download command
+    p_download = subparsers.add_parser('download', help='Download files from camera')
+    p_download.add_argument('file_num', nargs='?', type=int, help='File number to download')
+    p_download.add_argument('--output', '-o', help='Output directory or file')
+    p_download.add_argument('--all', '-a', action='store_true', help='Download all files')
+    p_download.add_argument('--retries', '-r', type=int, default=3, help='Max retry attempts')
+    p_download.add_argument('--no-verify', action='store_true', help='Skip checksum verification')
+    p_download.add_argument('--no-metadata', action='store_true', help='Skip YouTube metadata injection')
+    p_download.set_defaults(func=cmd_download)
+    
+    # Reset command
+    p_reset = subparsers.add_parser('reset', help='Reset USB port')
+    p_reset.add_argument('--force', '-f', action='store_true', help='Skip confirmation')
+    p_reset.set_defaults(func=cmd_reset)
+    
+    # Viewer command
+    p_viewer = subparsers.add_parser('viewer', help='Launch 360° viewer')
+    p_viewer.add_argument('file', nargs='?', help='Image or video file to open')
+    p_viewer.set_defaults(func=cmd_viewer)
+    
+    # YouTube command
+    p_youtube = subparsers.add_parser('youtube', help='Inject 360° metadata for YouTube')
+    p_youtube.add_argument('input', nargs='?', help='Input video file or directory')
+    p_youtube.add_argument('--output', '-o', help='Output file (optional)')
+    p_youtube.add_argument('--batch', '-b', action='store_true', help='Batch process directory')
+    p_youtube.add_argument('--in-place', '-i', action='store_true', help='Modify files in-place')
+    p_youtube.set_defaults(func=cmd_youtube)
+    
+    # WiFi command
+    p_wifi = subparsers.add_parser('wifi', help='Configure WiFi settings')
+    p_wifi.add_argument('--ssid', help='WiFi network name (SSID)')
+    p_wifi.add_argument('--password', help='WiFi password')
+    p_wifi.add_argument('--channel', type=int, help='WiFi channel (1-11)')
+    p_wifi.set_defaults(func=cmd_wifi)
+    
+    # Settings command
+    p_settings = subparsers.add_parser('settings', help='Camera settings')
+    p_settings.add_argument('--show', '-s', action='store_true', help='Show all settings')
+    p_settings.add_argument('--whitebalance', choices=['auto', 'daylight', 'fluorescent', 'tungsten'],
+                           help='Set white balance')
+    p_settings.add_argument('--copyright', help='Set copyright info')
+    p_settings.add_argument('--target', choices=['ram', 'card', 'sd'], help='Set capture target')
+    p_settings.set_defaults(func=cmd_settings)
+    
+    # Install command
+    p_install = subparsers.add_parser('install', help='Install desktop entry')
+    p_install.add_argument('--remove', '-r', action='store_true', help='Remove desktop entry')
+    p_install.set_defaults(func=cmd_install)
+    
+    # GUI command
+    p_gui = subparsers.add_parser('gui', help='Launch GUI (if available)')
+    p_gui.set_defaults(func=cmd_gui)
+    
+    args = parser.parse_args()
+    
+    if args.command is None:
+        parser.print_help()
+        return 0
+    
+    try:
+        return args.func(args)
+    except KeyboardInterrupt:
+        print("\n\n[!] Interrupted by user")
+        return 130
+    except Exception as e:
+        print(f"\n[!] Error: {e}")
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
