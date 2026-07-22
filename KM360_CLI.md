@@ -13,8 +13,11 @@ A comprehensive, single-file command-line interface for the Nikon KeyMission 360
 - **Time Sync** - Synchronize camera time to system time
 - **File Management** - List and download files with resume/checksum support
 - **USB Reset** - Reset USB port when camera times out
+- **Dependency Management** - Check and auto-install missing dependencies
 - **360° Viewer** - Interactive photo/video viewer
 - **YouTube Export** - Inject 360° spherical metadata
+- **Video Merge** - Losslessly merge videos preserving 360° metadata
+- **USB Reset** - Reset USB port with dependency auto-fix
 - **WiFi Config** - Change camera WiFi settings
 - **Camera Settings** - White balance, copyright, capture target
 - **Desktop Install** - Add to application menu
@@ -57,8 +60,9 @@ pip install libusb1
 # For 360° viewer
 pip install numpy pillow opencv-python
 
-# For YouTube export
+# For YouTube export and video merge
 sudo apt-get install ffmpeg
+sudo apt-get install libimage-exiftool-perl  # Recommended for 360° metadata
 # or: pip install spatialmedia
 ```
 
@@ -67,6 +71,12 @@ sudo apt-get install ffmpeg
 ### Quick Reference
 
 ```bash
+# System check and dependency management
+km360 check                      # Check all dependencies and USB setup
+km360 deps --install             # Interactive dependency installation
+km360 deps --install-all         # Auto-install all missing dependencies
+km360 deps --for merge --install # Check/install deps for specific command
+
 # Camera information
 km360 info
 
@@ -84,7 +94,8 @@ km360 download --all ~/Photos     # Download all files
 km360 download 5 ~/video.mp4      # Download specific file
 
 # USB reset (when camera times out)
-km360 reset
+km360 reset                      # Auto-fixes dependencies if needed
+km360 install --udev             # Install udev rules for non-root USB
 
 # 360° viewer
 km360 viewer photo.jpg
@@ -94,6 +105,12 @@ km360 viewer video.mp4
 km360 youtube video.mp4           # Creates video_youtube.mp4
 km360 youtube --in-place video.mp4  # Modify in-place
 km360 youtube --batch ~/Videos/     # Process all videos
+
+# Video merge (lossless concatenation)
+km360 merge -o out.mp4 part1.MP4 part2.MP4   # Merge specific files
+km360 merge --auto -o out.mp4 DSCN*.MP4      # Force auto-detection
+km360 merge -o out.mp4 DSCN*.MP4             # Smart auto-detection (prompts)
+km360 merge --detect-only DSCN*.MP4          # Preview which files would merge
 
 # WiFi configuration
 km360 wifi --ssid MyCamera360
@@ -127,6 +144,31 @@ km360 youtube --help
 
 ## Command Reference
 
+### `km360 check` / `km360 deps`
+
+Check system dependencies and USB reset capabilities.
+
+**Usage:**
+```bash
+km360 check                    # Full system check
+km360 deps --check             # Same as above
+km360 deps --install           # Interactive install
+km360 deps --install-all       # Auto-install all missing
+km360 deps --for youtube       # Check deps for specific command
+km360 deps --usb-reset         # Include USB reset analysis
+```
+
+**What it checks:**
+- gphoto2 (REQUIRED for camera communication)
+- libusb1 (optional, for PTP/raw USB)
+- ffmpeg (optional, for video operations)
+- exiftool (optional, for 360° metadata)
+- tkinter, numpy, pillow (optional, for GUI)
+- USB reset capabilities and udev rules
+
+**Auto-installation:**
+The tool detects your package manager (apt, pacman, brew) and offers to install missing dependencies automatically.
+
 ### `km360 info`
 
 Display detailed information about the connected camera via USB/PTP.
@@ -158,7 +200,14 @@ List all files on the camera with file numbers, names, and sizes.
 
 ### `km360 download`
 
-Download files from camera with resume support and checksum verification.
+Download files from camera with resume support, checksum verification, and **smart duplicate detection**.
+
+**Smart Duplicate Handling:**
+- Automatically detects existing files with same size
+- Skips duplicates by default (shows ⏭ skip indicator)
+- Verifies existing files with checksums
+- Shows summary of skipped files
+- Size mismatch detection (re-downloads incomplete files)
 
 **Options:**
 - `--output PATH` - Output directory or file
@@ -166,20 +215,57 @@ Download files from camera with resume support and checksum verification.
 - `--retries N` - Max retry attempts (default: 3)
 - `--no-verify` - Skip checksum verification
 - `--no-metadata` - Skip YouTube 360° metadata injection for videos
+- `--force` / `-f` - Re-download even if file exists
+- `--no-skip` - Same as --force (do not skip existing)
 
 **Examples:**
 ```bash
+# Download all files (skips existing by default)
 km360 download --all ~/Pictures/KM360
+
+# Re-download all files (overwrite existing)
+km360 download --all --force ~/Pictures/KM360
+
+# Download specific file
 km360 download 5 ~/Videos/myvideo.mp4
+
+# Download to specific directory
 km360 download 12 photo.jpg --output ~/Photos/
 ```
+
+**Output indicators:**
+- `⏭` - File already exists (skipped)
+- `✓` - Download successful
+- `🔄` - Re-downloading (incomplete or forced)
+- `✗` - Download failed
 
 ### `km360 reset`
 
 Reset the USB port when the camera becomes unresponsive or times out.
 
+**Smart Features:**
+- Automatically checks for required dependencies (libusb1)
+- Offers to install missing dependencies
+- Detects available reset methods and chooses the best one
+- Suggests udev rules installation if not present
+
+**Reset Methods (tried in order):**
+1. USB library reset (pyusb/libusb1) - most reliable
+2. usbreset utility (if available)
+3. sysfs authorized toggle (may need sudo)
+
 **Options:**
 - `--force` - Skip confirmation
+
+**Troubleshooting:**
+```bash
+# If reset fails due to permissions
+km360 install --udev           # Install udev rules
+# Then log out and back in
+
+# Check what's available
+km360 check --usb-reset
+```
 
 ### `km360 viewer`
 
@@ -211,6 +297,60 @@ km360 youtube --in-place video.mp4         # Modify in-place
 km360 youtube --batch ~/Videos/KM360/      # Process folder
 ```
 
+### `km360 merge`
+
+Losslessly merge/concatenate video files while preserving 360° spherical metadata.
+
+**How it works:**
+- Uses ffmpeg's concat demuxer for lossless concatenation (no re-encoding)
+- Extracts 360° metadata from the first input file
+- Re-injects metadata using exiftool for best YouTube compatibility
+- Validates that all videos have compatible parameters (codec, resolution, frame rate)
+
+**Smart Auto-Detection:**
+When you specify multiple files with sequential-looking names (e.g., `DSCN*.MP4`), the tool will:
+- Prompt you to use auto-detection (unless `--force` is used)
+- Analyze files for continuous recording sessions
+- Only merge files that are actually part of the same session
+- Skip files with gaps or different parameters
+
+**Options:**
+- `--output FILE` / `-o FILE` - Output filename (required unless --detect-only)
+- `--auto` / `-a` - Force auto-detection of split sessions
+- `--no-auto` - Disable smart auto-detection
+- `--detect-only` / `-d` - Preview which files would be merged without merging
+- `--gap-tolerance SECONDS` / `-g SECONDS` - Max gap between files (default: 3)
+- `--force` / `-f` - Skip confirmation prompts
+
+**Auto-detection Criteria:**
+When using `--auto`, the tool analyzes files to find continuous recording sessions:
+- Sequential file naming (e.g., DSCN0016.MP4, DSCN0017.MP4)
+- Similar creation timestamps (within gap-tolerance seconds)
+- Matching video parameters (codec, resolution, frame rate)
+
+**Examples:**
+```bash
+# Merge specific files in order
+km360 merge -o merged.mp4 DSCN0016.MP4 DSCN0017.MP4 DSCN0018.MP4
+
+# Smart auto-detection (prompts if sequential files detected)
+km360 merge -o merged.mp4 DSCN*.MP4
+
+# Force auto-detection
+km360 merge --auto -o merged.mp4 DSCN*.MP4
+
+# Preview what would be merged (no actual merge)
+km360 merge --detect-only DSCN*.MP4
+
+# Use with glob patterns, auto-confirm
+km360 merge --force -o out.mp4 *.MP4
+```
+
+**Requirements:**
+- ffmpeg (for concatenation)
+- exiftool (optional, for best metadata preservation)
+  - Install: `km360 deps --install-all` or see `km360 check`
+
 ### `km360 wifi`
 
 Configure camera WiFi settings.
@@ -232,10 +372,28 @@ View and modify camera settings.
 
 ### `km360 install`
 
-Install a desktop entry to add KeyMission 360 to your application menu.
+Install desktop entry and/or udev rules.
 
 **Options:**
-- `--remove` - Remove the desktop entry
+- `--remove` / `-r` - Remove the desktop entry
+- `--udev` / `-u` - Install udev rules for non-root USB access
+
+**Examples:**
+```bash
+km360 install                  # Install desktop entry
+km360 install --udev           # Install udev rules
+km360 install --udev --remove  # Remove udev rules
+```
+
+**About udev rules:**
+Installing udev rules allows the camera to be accessed without sudo:
+- USB reset works without root
+- Camera connection is more reliable
+- Recommended for all users
+
+After installing udev rules, you must:
+1. Add your user to the `plugdev` group: `sudo usermod -a -G plugdev $USER`
+2. Log out and back in (or reboot)
 
 ## USB Permissions (Linux)
 
@@ -289,6 +447,7 @@ This CLI provides the same core functionality as `km360_gui.py` but in a termina
 | USB reset | ✓ | ✓ |
 | 360° viewer | ✓ | ✓ |
 | YouTube export | ✓ | ✓ |
+| Video merge | ✓ | - |
 | WiFi config | ✓ | ✓ |
 | Batch operations | ✓ | Partial |
 | Drag-drop interface | - | ✓ |

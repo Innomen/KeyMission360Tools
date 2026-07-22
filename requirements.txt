@@ -1,18 +1,41 @@
-# Nikon KeyMission 360 Formatter
-# Python dependencies
+# Nikon KeyMission 360 Tools - Python Dependencies
+# ================================================
 
-# USB access library
+# Core USB access library (REQUIRED for format command, recommended for reset)
 # Provides Python bindings for libusb-1.0
 libusb1>=3.0.0
 
 # Alternative USB library (uncomment if preferred)
 # pyusb>=1.2.1
 
-# For YouTube 360 metadata injection (optional but recommended)
-# Install ExifTool via system package manager:
-#   Arch: sudo pacman -S perl-image-exiftool
-#   Ubuntu/Debian: sudo apt-get install libimage-exiftool-perl
-#   macOS: brew install exiftool
-#   Windows: https://exiftool.org/
-# Alternative: spatialmedia (Google's tool)
-#   pip install git+https://github.com/google/spatial-media.git
+# 360° Viewer dependencies (optional)
+numpy>=1.20.0
+Pillow>=9.0.0
+opencv-python>=4.5.0
+
+# System dependencies (install via package manager):
+# =================================================
+#
+# REQUIRED for camera operations:
+#   Arch:     sudo pacman -S gphoto2 libgphoto2
+#   Ubuntu:   sudo apt-get install gphoto2 libgphoto2-dev
+#   macOS:    brew install gphoto2
+#
+# REQUIRED for video operations:
+#   Arch:     sudo pacman -S ffmpeg
+#   Ubuntu:   sudo apt-get install ffmpeg
+#   macOS:    brew install ffmpeg
+#
+# RECOMMENDED for best 360° metadata injection:
+#   Arch:     sudo pacman -S perl-image-exiftool
+#   Ubuntu:   sudo apt-get install libimage-exiftool-perl
+#   macOS:    brew install exiftool
+#
+# GUI support:
+#   Arch:     sudo pacman -S tk
+#   Ubuntu:   sudo apt-get install python3-tk
+#
+# Quick install all dependencies:
+#   km360 deps --install-all
+#   or
+#   km360 check  (shows what's missing and how to install)

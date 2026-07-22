@@ -21,7 +21,7 @@ Usage:
 
 Author: KeyMission 360 Tools Project
 License: MIT
-Version: 2.0
+Version: 3.0
 """
 
 import argparse
@@ -35,17 +35,385 @@ import shutil
 import hashlib
 import time
 import math
+import glob
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, Tuple, List
 
 # Version info
-VERSION = "2.0"
+VERSION = "3.0"
 APP_NAME = "KeyMission 360 CLI"
 
+# =============================================================================
+# Dependency Management (Embedded)
+# =============================================================================
+
+
+class KM360DepManager:
+    """Lightweight embedded dependency manager"""
+
+    DEPS = {
+        "gphoto2": {
+            "check": lambda: shutil.which("gphoto2") is not None,
+            "install": {
+                "pacman": [
+                    "sudo",
+                    "pacman",
+                    "-S",
+                    "--noconfirm",
+                    "gphoto2",
+                    "libgphoto2",
+                ],
+                "apt": [
+                    "sudo",
+                    "apt-get",
+                    "install",
+                    "-y",
+                    "gphoto2",
+                    "libgphoto2-dev",
+                ],
+            },
+            "optional": False,
+            "desc": "Camera communication",
+        },
+        "libusb1": {
+            "check": lambda: KM360DepManager._check_python_module("usb1"),
+            "install": {"pip": [sys.executable, "-m", "pip", "install", "libusb1"]},
+            "optional": True,
+            "desc": "Raw USB/PTP communication",
+        },
+        "ffmpeg": {
+            "check": lambda: shutil.which("ffmpeg") is not None,
+            "install": {
+                "pacman": ["sudo", "pacman", "-S", "--noconfirm", "ffmpeg"],
+                "apt": ["sudo", "apt-get", "install", "-y", "ffmpeg"],
+            },
+            "optional": True,
+            "desc": "Video processing",
+        },
+        "exiftool": {
+            "check": lambda: shutil.which("exiftool") is not None,
+            "install": {
+                "pacman": [
+                    "sudo",
+                    "pacman",
+                    "-S",
+                    "--noconfirm",
+                    "perl-image-exiftool",
+                ],
+                "apt": ["sudo", "apt-get", "install", "-y", "libimage-exiftool-perl"],
+            },
+            "optional": True,
+            "desc": "360° metadata injection",
+        },
+        "tkinter": {
+            "check": lambda: KM360DepManager._check_python_module("tkinter"),
+            "install": {
+                "pacman": ["sudo", "pacman", "-S", "--noconfirm", "tk"],
+                "apt": ["sudo", "apt-get", "install", "-y", "python3-tk"],
+            },
+            "optional": True,
+            "desc": "GUI components",
+        },
+        "numpy": {
+            "check": lambda: KM360DepManager._check_python_module("numpy"),
+            "install": {"pip": [sys.executable, "-m", "pip", "install", "numpy"]},
+            "optional": True,
+            "desc": "360° viewer math",
+        },
+        "pillow": {
+            "check": lambda: KM360DepManager._check_python_module("PIL"),
+            "install": {"pip": [sys.executable, "-m", "pip", "install", "Pillow"]},
+            "optional": True,
+            "desc": "Image processing",
+        },
+        "opencv": {
+            "check": lambda: KM360DepManager._check_python_module("cv2"),
+            "install": {
+                "pip": [sys.executable, "-m", "pip", "install", "opencv-python"]
+            },
+            "optional": True,
+            "desc": "Video playback",
+        },
+    }
+
+    CMD_DEPS = {
+        "info": ["gphoto2"],
+        "format": ["gphoto2", "libusb1"],
+        "time": ["gphoto2"],
+        "list": ["gphoto2"],
+        "download": ["gphoto2", "ffmpeg"],
+        "youtube": ["ffmpeg"],
+        "merge": ["ffmpeg"],
+        "reset": ["libusb1"],
+        "viewer": ["tkinter", "numpy", "pillow"],
+        "wifi": ["gphoto2"],
+        "settings": ["gphoto2"],
+        "gui": ["gphoto2", "tkinter", "numpy", "pillow"],
+    }
+
+    @staticmethod
+    def _check_python_module(name):
+        try:
+            __import__(name)
+            return True
+        except ImportError:
+            return False
+
+    @staticmethod
+    def detect_pm():
+        if shutil.which("pacman"):
+            return "pacman"
+        if shutil.which("apt-get"):
+            return "apt"
+        if shutil.which("pip3"):
+            return "pip"
+        if shutil.which("pip"):
+            return "pip"
+        return None
+
+    @staticmethod
+    def check(name):
+        if name in KM360DepManager.DEPS:
+            return KM360DepManager.DEPS[name]["check"]()
+        return False
+
+    @staticmethod
+    def install(name, auto=False, gui_mode=False):
+        dep = KM360DepManager.DEPS.get(name)
+        if not dep:
+            return False
+
+        pm = KM360DepManager.detect_pm()
+        if not pm or pm not in dep["install"]:
+            print(f"  Cannot auto-install {name} - no package manager")
+            return False
+
+        cmd = dep["install"][pm]
+
+        # Check if we need elevated privileges (sudo)
+        needs_sudo = any(c in ["sudo", "pacman", "apt-get", "apt"] for c in cmd)
+
+        # In GUI mode, try pkexec instead of sudo for graphical auth
+        if gui_mode and needs_sudo and cmd[0] == "sudo":
+            if shutil.which("pkexec"):
+                # Replace sudo with pkexec for GUI auth dialog
+                cmd = ["pkexec"] + cmd[1:]
+            else:
+                print(f"  Cannot install {name} automatically in GUI mode.")
+                print(f"  Please run in terminal: {' '.join(cmd)}")
+                return False
+
+        print(f"  Installing {name}: {' '.join(cmd)}")
+
+        if not auto and not gui_mode:
+            resp = input("  Proceed? [Y/n]: ")
+            if resp.lower() in ["n", "no"]:
+                return False
+
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            if result.returncode != 0:
+                stderr = result.stderr.lower() if result.stderr else ""
+                if "password" in stderr or "permission" in stderr or "auth" in stderr:
+                    print("  ✗ Authentication failed or password required")
+                    print(f"  Please install manually: {' '.join(cmd)}")
+                else:
+                    print(f"  ✗ Error: {result.stderr[:200]}")
+                return False
+            return True
+        except Exception as e:
+            print(f"  Install failed: {e}")
+            return False
+
+    @staticmethod
+    def ensure_for_command(cmd, auto_install=False):
+        """Ensure deps for a command, optionally auto-install"""
+        needed = KM360DepManager.CMD_DEPS.get(cmd, [])
+        missing = [n for n in needed if not KM360DepManager.check(n)]
+
+        if not missing:
+            return True
+
+        print(f"[{cmd}] Missing dependencies:")
+        for name in missing:
+            dep = KM360DepManager.DEPS[name]
+            opt = "optional" if dep["optional"] else "REQUIRED"
+            print(f"  • {name} ({opt}): {dep['desc']}")
+
+        if auto_install:
+            print("\nAuto-installing...")
+            for name in missing:
+                KM360DepManager.install(name, auto=True)
+            # Re-check
+            still_missing = [n for n in missing if not KM360DepManager.check(n)]
+            if still_missing:
+                req_missing = [
+                    n for n in still_missing if not KM360DepManager.DEPS[n]["optional"]
+                ]
+                if req_missing:
+                    print(f"✗ Required deps still missing: {', '.join(req_missing)}")
+                    return False
+            return True
+        else:
+            resp = input("\nInstall missing dependencies? [Y/n]: ")
+            if resp.lower() not in ["n", "no"]:
+                for name in missing:
+                    KM360DepManager.install(name, auto=False)
+                still_missing = [n for n in missing if not KM360DepManager.check(n)]
+                req_missing = [
+                    n for n in still_missing if not KM360DepManager.DEPS[n]["optional"]
+                ]
+                return len(req_missing) == 0
+
+        # Allow optional-only missing
+        req_missing = [n for n in missing if not KM360DepManager.DEPS[n]["optional"]]
+        return len(req_missing) == 0
+
+    @staticmethod
+    def check_usb_reset():
+        """Check USB reset capabilities and offer fixes"""
+        print("\nUSB Reset Check:")
+
+        has_usb_lib = KM360DepManager.check("libusb1")
+        has_usbreset = shutil.which("usbreset") is not None
+
+        methods = []
+        if has_usb_lib:
+            methods.append(("USB library (pyusb/libusb1)", True, "Preferred"))
+        else:
+            methods.append(
+                ("USB library (pyusb/libusb1)", False, "pip install libusb1")
+            )
+
+        if has_usbreset:
+            methods.append(("usbreset utility", True, "Available"))
+        else:
+            methods.append(("usbreset utility", False, "Package: usbutils"))
+
+        methods.append(("sysfs toggle", True, "May need sudo"))
+
+        all_ok = True
+        for name, ok, note in methods:
+            status = "✓" if ok else "✗"
+            print(f"  [{status}] {name}: {note}")
+            if not ok:
+                all_ok = False
+
+        # Check udev rules
+        udev_path = Path("/etc/udev/rules.d/99-keymission360.rules")
+        if not udev_path.exists():
+            print("\n⚠ udev rules not installed - USB may need sudo")
+            print("  Install: km360 install --udev")
+
+        return all_ok
+
+
+def cmd_deps(args):
+    """Dependency management command"""
+    if args.check or args.usb_reset:
+        print("=" * 60)
+        print("KeyMission 360 - Dependency Check")
+        print("=" * 60)
+        print()
+
+        pm = KM360DepManager.detect_pm()
+        print(f"Package Manager: {pm or 'unknown'}")
+        print()
+
+        print("Dependencies:")
+        for name, dep in KM360DepManager.DEPS.items():
+            ok = dep["check"]()
+            opt = "optional" if dep["optional"] else "REQUIRED"
+            status = "✓" if ok else "✗"
+            print(f"  [{status}] {name} ({opt}): {dep['desc']}")
+
+        if args.usb_reset:
+            KM360DepManager.check_usb_reset()
+
+        print()
+        print("To install missing:")
+        print("  km360 deps --install         # Interactive")
+        print("  km360 deps --install-all     # Auto-install")
+        return 0
+
+    if args.install or args.install_all:
+        print("=" * 60)
+        print("KeyMission 360 - Dependency Installation")
+        print("=" * 60)
+        print()
+
+        # Detect if running in GUI/non-terminal mode
+        is_gui = not sys.stdin.isatty() if hasattr(sys.stdin, "isatty") else False
+        if is_gui:
+            print("(Running in GUI mode - using graphical authentication)")
+            print()
+
+        pm = KM360DepManager.detect_pm()
+        if not pm:
+            print("✗ No supported package manager found (apt, pacman, pip)")
+            return 1
+
+        print(f"Using package manager: {pm}")
+        print()
+
+        to_install = []
+        for name, dep in KM360DepManager.DEPS.items():
+            if not dep["check"]() and pm in dep["install"]:
+                to_install.append(name)
+
+        if not to_install:
+            print("✓ All dependencies satisfied!")
+            return 0
+
+        print(f"Dependencies to install: {', '.join(to_install)}")
+        print()
+
+        if is_gui and not shutil.which("pkexec"):
+            print("⚠ GUI mode detected but pkexec not available.")
+            print("  Install commands require administrator privileges.")
+            print("  Please install manually:")
+            for name in to_install:
+                dep = KM360DepManager.DEPS[name]
+                if pm in dep["install"]:
+                    print(f"    {' '.join(dep['install'][pm])}")
+            return 1
+
+        success = []
+        failed = []
+        for name in to_install:
+            if KM360DepManager.install(name, auto=args.install_all, gui_mode=is_gui):
+                success.append(name)
+            else:
+                failed.append(name)
+
+        print()
+        if success:
+            print(f"✓ Installed: {', '.join(success)}")
+        if failed:
+            print(f"✗ Failed: {', '.join(failed)}")
+
+        return 0 if not failed else 1
+
+    if args.for_command:
+        ok = KM360DepManager.ensure_for_command(args.for_command, args.install_all)
+        return 0 if ok else 1
+
+    # Default: show status
+    return cmd_deps(
+        argparse.Namespace(
+            check=True,
+            usb_reset=False,
+            install=False,
+            install_all=False,
+            for_command=None,
+        )
+    )
+
+
 # USB IDs
-VENDOR_ID = 0x04b0
-PRODUCT_ID = 0x019f
+VENDOR_ID = 0x04B0
+PRODUCT_ID = 0x019F
 
 # PTP Constants
 PTP_CONTAINER_COMMAND = 0x0001
@@ -59,6 +427,7 @@ PTP_RC_OK = 0x2001
 # Optional imports
 try:
     import usb1
+
     USB1_AVAILABLE = True
 except ImportError:
     USB1_AVAILABLE = False
@@ -66,6 +435,7 @@ except ImportError:
 try:
     import usb.core
     import usb.util
+
     PYUSB_AVAILABLE = True
 except ImportError:
     PYUSB_AVAILABLE = False
@@ -77,7 +447,7 @@ def format_size_bytes(size):
     """Format bytes to human readable string"""
     if size is None:
         return "Unknown"
-    for unit in ['B', 'KB', 'MB', 'GB']:
+    for unit in ["B", "KB", "MB", "GB"]:
         if size < 1024:
             return f"{size:.1f} {unit}"
         size /= 1024
@@ -88,8 +458,7 @@ def check_gphoto2():
     """Check if gphoto2 is installed"""
     try:
         result = subprocess.run(
-            ["gphoto2", "--version"],
-            capture_output=True, text=True, timeout=5
+            ["gphoto2", "--version"], capture_output=True, text=True, timeout=5
         )
         return result.returncode == 0
     except:
@@ -100,8 +469,7 @@ def detect_camera():
     """Check if KeyMission 360 is connected"""
     try:
         result = subprocess.run(
-            ["gphoto2", "--auto-detect"],
-            capture_output=True, text=True, timeout=10
+            ["gphoto2", "--auto-detect"], capture_output=True, text=True, timeout=10
         )
         return "KeyMission" in result.stdout or "04b0" in result.stdout
     except:
@@ -112,19 +480,20 @@ def detect_camera():
 # INFO Command
 # =============================================================================
 
+
 def cmd_info(args):
     """Show camera information"""
     print("=" * 60)
     print("Nikon KeyMission 360 Camera Information")
     print("=" * 60)
     print()
-    
+
     if not USB1_AVAILABLE:
         print("[!] usb1 module not installed. Using gphoto2 fallback.")
         print("    Install with: pip install libusb1")
         print()
         return _info_gphoto2()
-    
+
     try:
         with usb1.USBContext() as context:
             device = None
@@ -132,13 +501,13 @@ def cmd_info(args):
                 if dev.getVendorID() == VENDOR_ID and dev.getProductID() == PRODUCT_ID:
                     device = dev
                     break
-            
+
             if not device:
                 print("[!] Camera not found via USB!")
                 print("    Trying gphoto2 fallback...")
                 print()
                 return _info_gphoto2()
-            
+
             # USB Device Information
             print("USB Device Information:")
             print("-" * 60)
@@ -146,38 +515,44 @@ def cmd_info(args):
             print(f"  Product ID:     0x{device.getProductID():04X}")
             print(f"  Bus:            {device.getBusNumber()}")
             print(f"  Device Address: {device.getDeviceAddress()}")
-            
+
             # String descriptors
             print()
             print("Device Strings:")
             print("-" * 60)
             try:
-                print(f"  Manufacturer:   {device.getStringDescriptor(device.device_descriptor.iManufacturer, 0x0409)}")
-                print(f"  Product:        {device.getStringDescriptor(device.device_descriptor.iProduct, 0x0409)}")
-                print(f"  Serial Number:  {device.getStringDescriptor(device.device_descriptor.iSerialNumber, 0x0409)}")
+                print(
+                    f"  Manufacturer:   {device.getStringDescriptor(device.device_descriptor.iManufacturer, 0x0409)}"
+                )
+                print(
+                    f"  Product:        {device.getStringDescriptor(device.device_descriptor.iProduct, 0x0409)}"
+                )
+                print(
+                    f"  Serial Number:  {device.getStringDescriptor(device.device_descriptor.iSerialNumber, 0x0409)}"
+                )
             except Exception as e:
                 print(f"  Error reading strings: {e}")
-            
+
             # PTP Communication
             print()
             print("PTP Communication:")
             print("-" * 60)
-            
+
             handle = device.open()
             handle.setConfiguration(1)
-            
+
             for i in range(4):
                 try:
                     if handle.kernelDriverActive(i):
                         handle.detachKernelDriver(i)
                 except:
                     pass
-            
+
             config = device[0]
             setting = next(config[0].iterSettings())
             interface_num = setting.getNumber()
             handle.claimInterface(interface_num)
-            
+
             bulk_in = bulk_out = None
             for ep in setting.iterEndpoints():
                 addr = ep.getAddress()
@@ -187,47 +562,59 @@ def cmd_info(args):
                         bulk_in = addr
                     else:
                         bulk_out = addr
-            
+
             print(f"  Interface:      {interface_num}")
             print(f"  Bulk OUT:       0x{bulk_out:02X}")
             print(f"  Bulk IN:        0x{bulk_in:02X}")
-            
+
             # Get storage IDs
             trans_id = 1
-            session = struct.pack('<IHHII', 16, PTP_CONTAINER_COMMAND, PTP_OC_OPEN_SESSION, trans_id, 1)
+            session = struct.pack(
+                "<IHHII", 16, PTP_CONTAINER_COMMAND, PTP_OC_OPEN_SESSION, trans_id, 1
+            )
             handle.bulkWrite(bulk_out, session, timeout=5000)
             handle.bulkRead(bulk_in, 512, timeout=5000)
-            
+
             trans_id += 1
-            storage_cmd = struct.pack('<IHHII', 16, PTP_CONTAINER_COMMAND, PTP_OC_GET_STORAGE_IDS, trans_id, 0)
+            storage_cmd = struct.pack(
+                "<IHHII", 16, PTP_CONTAINER_COMMAND, PTP_OC_GET_STORAGE_IDS, trans_id, 0
+            )
             handle.bulkWrite(bulk_out, storage_cmd, timeout=5000)
-            
+
             data = handle.bulkRead(bulk_in, 512, timeout=5000)
             handle.bulkRead(bulk_in, 512, timeout=5000)
-            
+
             print()
             print("Storage Devices:")
             print("-" * 60)
-            
+
             if len(data) >= 12:
-                count = struct.unpack('<I', bytes(data[8:12]))[0]
+                count = struct.unpack("<I", bytes(data[8:12]))[0]
                 print(f"  Count: {count}")
-                
+
                 for i in range(count):
                     offset = 12 + (i * 4)
                     if offset + 4 <= len(data):
-                        storage_id = struct.unpack('<I', bytes(data[offset:offset+4]))[0]
-                        name = "(Internal)" if storage_id == 0x00000001 else "(SD Card)" if storage_id == 0x00010001 else ""
-                        print(f"  Storage {i+1}:       0x{storage_id:08x} {name}")
-            
+                        storage_id = struct.unpack(
+                            "<I", bytes(data[offset : offset + 4])
+                        )[0]
+                        name = (
+                            "(Internal)"
+                            if storage_id == 0x00000001
+                            else "(SD Card)"
+                            if storage_id == 0x00010001
+                            else ""
+                        )
+                        print(f"  Storage {i + 1}:       0x{storage_id:08x} {name}")
+
             handle.releaseInterface(interface_num)
-            
+
     except Exception as e:
         print(f"[!] USB Error: {e}")
         print("    Trying gphoto2 fallback...")
         print()
         return _info_gphoto2()
-    
+
     print()
     print("=" * 60)
     return 0
@@ -238,11 +625,10 @@ def _info_gphoto2():
     if not check_gphoto2():
         print("[!] gphoto2 not installed!")
         return 1
-    
+
     try:
         result = subprocess.run(
-            ["gphoto2", "--summary"],
-            capture_output=True, text=True, timeout=30
+            ["gphoto2", "--summary"], capture_output=True, text=True, timeout=30
         )
         print(result.stdout)
         if result.stderr:
@@ -250,13 +636,14 @@ def _info_gphoto2():
     except Exception as e:
         print(f"[!] Error: {e}")
         return 1
-    
+
     return 0
 
 
 # =============================================================================
 # FORMAT Command
 # =============================================================================
+
 
 class PTPError(Exception):
     pass
@@ -270,37 +657,42 @@ class KeyMission360Formatter:
         self.bulk_out = None
         self.interface_num = 0
         self.transaction_id = 0
-    
+
     def find_camera(self) -> bool:
         context = usb1.USBContext()
         for device in context.getDeviceIterator(skip_on_error=True):
-            if device.getVendorID() == VENDOR_ID and device.getProductID() == PRODUCT_ID:
-                print(f"[✓] Found Nikon KeyMission 360 at Bus {device.getBusNumber()} Device {device.getDeviceAddress()}")
+            if (
+                device.getVendorID() == VENDOR_ID
+                and device.getProductID() == PRODUCT_ID
+            ):
+                print(
+                    f"[✓] Found Nikon KeyMission 360 at Bus {device.getBusNumber()} Device {device.getDeviceAddress()}"
+                )
                 self.device = device
                 self.handle = device.open()
                 return True
         return False
-    
+
     def setup_usb(self):
         if not self.handle:
             raise PTPError("Camera not opened")
-        
+
         self.handle.setConfiguration(1)
-        
+
         for i in range(4):
             try:
                 if self.handle.kernelDriverActive(i):
                     self.handle.detachKernelDriver(i)
             except:
                 pass
-        
+
         config = self.device[0]
         interface = config[0]
         setting = next(interface.iterSettings())
         self.interface_num = setting.getNumber()
-        
+
         self.handle.claimInterface(self.interface_num)
-        
+
         for ep in setting.iterEndpoints():
             addr = ep.getAddress()
             attrs = ep.getAttributes()
@@ -309,20 +701,22 @@ class KeyMission360Formatter:
                     self.bulk_in = addr
                 else:
                     self.bulk_out = addr
-        
+
         if not self.bulk_in or not self.bulk_out:
             raise PTPError("Could not find bulk endpoints")
-    
-    def send_ptp_command(self, opcode: int, params: Tuple[int, ...] = (), data_phase: bool = False):
+
+    def send_ptp_command(
+        self, opcode: int, params: Tuple[int, ...] = (), data_phase: bool = False
+    ):
         self.transaction_id += 1
         length = 12 + (4 * len(params))
-        packet = struct.pack('<IHH', length, PTP_CONTAINER_COMMAND, opcode)
-        packet += struct.pack('<I', self.transaction_id)
+        packet = struct.pack("<IHH", length, PTP_CONTAINER_COMMAND, opcode)
+        packet += struct.pack("<I", self.transaction_id)
         for param in params:
-            packet += struct.pack('<I', param)
-        
+            packet += struct.pack("<I", param)
+
         self.handle.bulkWrite(self.bulk_out, packet, timeout=5000)
-        
+
         if data_phase:
             data = self.handle.bulkRead(self.bulk_in, 512, timeout=5000)
             resp = self.handle.bulkRead(self.bulk_in, 512, timeout=5000)
@@ -330,15 +724,15 @@ class KeyMission360Formatter:
         else:
             resp = self.handle.bulkRead(self.bulk_in, 512, timeout=5000)
             return resp
-    
+
     def parse_response(self, response: bytes) -> Tuple[int, int]:
         if len(response) < 8:
             raise PTPError(f"Response too short: {len(response)} bytes")
-        resp_type = struct.unpack('<H', bytes(response[4:6]))[0]
-        resp_code = struct.unpack('<H', bytes(response[6:8]))[0]
-        resp_trans = struct.unpack('<I', bytes(response[8:12]))[0]
+        struct.unpack("<H", bytes(response[4:6]))[0]
+        resp_code = struct.unpack("<H", bytes(response[6:8]))[0]
+        resp_trans = struct.unpack("<I", bytes(response[8:12]))[0]
         return resp_code, resp_trans
-    
+
     def open_session(self) -> bool:
         print("\n[+] Opening PTP session...")
         resp = self.send_ptp_command(PTP_OC_OPEN_SESSION, (1,))
@@ -349,7 +743,7 @@ class KeyMission360Formatter:
         else:
             print(f"[!] Failed to open session: 0x{code:04x}")
             return False
-    
+
     def get_storage_ids(self) -> List[int]:
         print("\n[+] Querying storage devices...")
         data, resp = self.send_ptp_command(PTP_OC_GET_STORAGE_IDS, data_phase=True)
@@ -357,89 +751,95 @@ class KeyMission360Formatter:
         if code != PTP_RC_OK:
             print(f"[!] Failed to get storage IDs: 0x{code:04x}")
             return []
-        
+
         if len(data) < 12:
             print("[!] Invalid data response")
             return []
-        
-        count = struct.unpack('<I', bytes(data[8:12]))[0]
+
+        count = struct.unpack("<I", bytes(data[8:12]))[0]
         print(f"[*] Found {count} storage device(s)")
-        
+
         storage_ids = []
         for i in range(count):
             offset = 12 + (i * 4)
             if offset + 4 <= len(data):
-                storage_id = struct.unpack('<I', bytes(data[offset:offset+4]))[0]
+                storage_id = struct.unpack("<I", bytes(data[offset : offset + 4]))[0]
                 storage_ids.append(storage_id)
-                name = "(Internal)" if storage_id == 0x00000001 else "(SD Card)" if storage_id == 0x00010001 else ""
-                print(f"    Storage {i+1}: 0x{storage_id:08x} {name}")
-        
+                name = (
+                    "(Internal)"
+                    if storage_id == 0x00000001
+                    else "(SD Card)"
+                    if storage_id == 0x00010001
+                    else ""
+                )
+                print(f"    Storage {i + 1}: 0x{storage_id:08x} {name}")
+
         return storage_ids
-    
+
     def format_storage(self, storage_id: int, force: bool = False) -> bool:
         print(f"\n[+] Formatting storage 0x{storage_id:08x}...")
-        
+
         if not force:
             print("[!] WARNING: This will erase ALL data on the memory card!")
             response = input("    Type 'YES' to proceed: ")
             if response != "YES":
                 print("[x] Aborted")
                 return False
-        
+
         print("[*] Sending FormatStore command...")
         print("[*] This may take several seconds...")
-        
+
         resp = self.send_ptp_command(PTP_OC_FORMAT_STORE, (storage_id,))
         code, _ = self.parse_response(resp)
-        
+
         if code == PTP_RC_OK:
-            print(f"[✓] Format completed successfully!")
+            print("[✓] Format completed successfully!")
             return True
         elif code == 0x2008:
             print(f"[!] Invalid storage ID: 0x{storage_id:08x}")
         elif code == 0x201D:
-            print(f"[!] Invalid parameter")
+            print("[!] Invalid parameter")
         elif code == 0x2019:
-            print(f"[!] Device is busy")
+            print("[!] Device is busy")
         else:
             print(f"[!] Format failed: 0x{code:04x}")
-        
+
         return False
-    
+
     def close(self):
         if self.handle:
             try:
                 self.handle.releaseInterface(self.interface_num)
             except:
                 pass
-    
+
     def run(self, storage_id: Optional[int] = None, force: bool = False) -> bool:
         try:
             if not self.find_camera():
                 print("[!] Camera not found! Make sure it's connected via USB.")
                 return False
-            
+
             self.setup_usb()
-            
+
             if not self.open_session():
                 return False
-            
+
             if storage_id is None:
                 storage_ids = self.get_storage_ids()
-                
+
                 if not storage_ids:
                     print("[!] No storage devices found")
                     return False
-                
+
                 if 0x00010001 in storage_ids:
                     storage_id = 0x00010001
                     print(f"[*] Auto-selected memory card: 0x{storage_id:08x}")
                 else:
                     storage_id = storage_ids[0]
                     print(f"[*] Auto-selected storage: 0x{storage_id:08x}")
-            
+
             return self.format_storage(storage_id, force)
-            
+
         except Exception as e:
             print(f"[!] Error: {e}")
             return False
@@ -453,14 +853,14 @@ def cmd_format(args):
     print("Nikon KeyMission 360 Memory Card Formatter")
     print("=" * 60)
     print()
-    
+
     if not USB1_AVAILABLE:
         print("[!] usb1 module not installed!")
         print("    Install with: pip install libusb1")
         return 1
-    
+
     formatter = KeyMission360Formatter()
-    
+
     if args.list:
         try:
             if not formatter.find_camera():
@@ -474,7 +874,7 @@ def cmd_format(args):
         except Exception as e:
             print(f"[!] Error: {e}")
             return 1
-    
+
     success = formatter.run(storage_id=args.storage, force=args.force)
     return 0 if success else 1
 
@@ -483,16 +883,19 @@ def cmd_format(args):
 # TIME Command
 # =============================================================================
 
+
 def get_camera_time():
     """Get current camera date/time"""
     try:
         result = subprocess.run(
             ["gphoto2", "--get-config=/main/settings/datetime"],
-            capture_output=True, text=True, timeout=10
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
-        for line in result.stdout.split('\n'):
-            if 'Printable:' in line:
-                return line.split(':', 1)[1].strip()
+        for line in result.stdout.split("\n"):
+            if "Printable:" in line:
+                return line.split(":", 1)[1].strip()
         return None
     except:
         return None
@@ -503,7 +906,9 @@ def set_camera_time():
     try:
         result = subprocess.run(
             ["gphoto2", "--set-config", "datetime=now"],
-            capture_output=True, text=True, timeout=10
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         return result.returncode == 0
     except:
@@ -516,42 +921,42 @@ def cmd_time(args):
     print("Nikon KeyMission 360 Time Synchronization")
     print("=" * 60)
     print()
-    
+
     if not check_gphoto2():
         print("[!] Error: gphoto2 is not installed!")
         print("    Install with: sudo apt-get install gphoto2")
         return 1
-    
+
     if not detect_camera():
         print("[!] Camera not found!")
         print("    Make sure the camera is connected via USB and powered on.")
         return 1
-    
+
     print("[✓] KeyMission 360 detected")
     print()
-    
+
     camera_time = get_camera_time()
     if camera_time:
         print(f"[*] Camera time: {camera_time}")
     else:
         print("[!] Could not read camera time")
-    
+
     if args.check:
         print(f"\nCurrent camera time: {camera_time or 'Unknown'}")
         return 0
-    
+
     system_time = datetime.now().strftime("%a %d %b %Y %I:%M:%S %p")
     print(f"[*] System time:   {system_time}")
     print()
-    
+
     if set_camera_time():
         print("[✓] Time synchronized successfully!")
         print()
-        
+
         new_camera_time = get_camera_time()
         if new_camera_time:
             print(f"[✓] New camera time: {new_camera_time}")
-        
+
         print("=" * 60)
         print("Time sync complete. Your photos will now have")
         print("the correct timestamp.")
@@ -566,52 +971,52 @@ def cmd_time(args):
 # LIST Command
 # =============================================================================
 
+
 def cmd_list(args):
     """List files on camera"""
     print("=" * 60)
     print("Nikon KeyMission 360 - File List")
     print("=" * 60)
     print()
-    
+
     if not check_gphoto2():
         print("[!] gphoto2 not installed!")
         return 1
-    
+
     if not detect_camera():
         print("[!] Camera not found!")
         return 1
-    
+
     try:
         result = subprocess.run(
-            ["gphoto2", "--list-files"],
-            capture_output=True, text=True, timeout=30
+            ["gphoto2", "--list-files"], capture_output=True, text=True, timeout=30
         )
-        
-        lines = result.stdout.strip().split('\n')
+
+        lines = result.stdout.strip().split("\n")
         files = []
-        
+
         for line in lines:
-            if line.strip().startswith('#'):
+            if line.strip().startswith("#"):
                 parts = line.strip().split()
                 if len(parts) >= 3:
                     num = parts[0][1:]
                     name = parts[1]
                     size = parts[2]
                     files.append((num, name, size))
-        
+
         if not files:
             print("No files found on camera.")
             return 0
-        
+
         print(f"Found {len(files)} file(s):\n")
         print(f"{'Num':<6} {'Name':<30} {'Size':<10}")
         print("-" * 60)
-        
+
         for num, name, size in files:
             print(f"#{num:<5} {name:<30} {size:<10}")
-        
+
         return 0
-        
+
     except Exception as e:
         print(f"[!] Error: {e}")
         return 1
@@ -621,15 +1026,15 @@ def cmd_list(args):
 # DOWNLOAD Command
 # =============================================================================
 
+
 def get_file_info(file_num):
     """Get file info from camera"""
     try:
         result = subprocess.run(
-            ["gphoto2", "--list-files"],
-            capture_output=True, text=True, timeout=30
+            ["gphoto2", "--list-files"], capture_output=True, text=True, timeout=30
         )
-        for line in result.stdout.split('\n'):
-            if line.strip().startswith(f'#{file_num}'):
+        for line in result.stdout.split("\n"):
+            if line.strip().startswith(f"#{file_num}"):
                 parts = line.strip().split()
                 if len(parts) >= 3:
                     return parts[1], parts[2]
@@ -641,11 +1046,11 @@ def get_file_info(file_num):
 def parse_size(size_str):
     """Parse size string like '12MB' to bytes"""
     size_str = size_str.upper()
-    multipliers = {'B': 1, 'KB': 1024, 'MB': 1024**2, 'GB': 1024**3}
+    multipliers = {"B": 1, "KB": 1024, "MB": 1024**2, "GB": 1024**3}
     for suffix, mult in multipliers.items():
         if size_str.endswith(suffix):
             try:
-                return int(float(size_str[:-len(suffix)]) * mult)
+                return int(float(size_str[: -len(suffix)]) * mult)
             except:
                 return None
     try:
@@ -666,65 +1071,119 @@ def calculate_checksum(filepath):
         return None
 
 
-def download_file(file_num, output_path, max_retries=3, verify=True, show_progress=True, inject_metadata=True):
-    """Download a file from camera"""
+def download_file(
+    file_num,
+    output_path,
+    max_retries=3,
+    verify=True,
+    show_progress=True,
+    inject_metadata=True,
+    skip_existing=True,
+    force=False,
+):
+    """Download a file from camera
+
+    Args:
+        file_num: Camera file number
+        output_path: Where to save the file
+        max_retries: Max download attempts
+        verify: Verify checksum after download
+        show_progress: Show progress messages
+        inject_metadata: Inject 360 metadata for videos
+        skip_existing: Skip if file exists with same size (if not force)
+        force: Re-download even if file exists
+    """
     name, size_str = get_file_info(file_num)
     if not name:
         return False, "Could not get file info from camera", None
-    
+
     camera_size = parse_size(size_str) if size_str else None
-    
-    if show_progress:
-        print(f"Downloading: {name}")
-        print(f"Expected size: {format_size_bytes(camera_size)}")
-    
-    # Check if output file already exists and is complete
-    if os.path.exists(output_path):
+
+    # Check if output file already exists
+    if os.path.exists(output_path) and not force:
         existing_size = os.path.getsize(output_path)
+
         if camera_size and existing_size == camera_size:
-            if verify:
-                if show_progress:
-                    print("File exists, verifying...")
-                checksum = calculate_checksum(output_path)
-                if checksum:
-                    return True, "File already exists and verified", checksum
+            # File exists with correct size
+            if skip_existing:
+                if verify:
+                    if show_progress:
+                        print(f"⏭ {name} - already exists (verifying...)", end=" ")
+                    checksum = calculate_checksum(output_path)
+                    if checksum:
+                        if show_progress:
+                            print("✓ verified)")
+                        return True, "Already exists (verified)", checksum
+                    else:
+                        if show_progress:
+                            print("⚠ checksum failed, re-downloading)")
+                        # Fall through to re-download
+                else:
+                    if show_progress:
+                        print(f"⏭ {name} - already exists")
+                    return True, "Already exists", None
             else:
-                return True, "File already exists", None
-    
+                # Don't skip, but note it exists
+                if show_progress:
+                    print(f"⚠ {name} - exists but re-downloading (skip_existing=False)")
+        else:
+            # Size mismatch - file is incomplete or different
+            if show_progress:
+                if camera_size:
+                    print(
+                        f"🔄 {name} - incomplete ({format_size_bytes(existing_size)} / {format_size_bytes(camera_size)})"
+                    )
+                else:
+                    print(f"🔄 {name} - exists but size unknown, re-downloading")
+            # Fall through to re-download
+    elif os.path.exists(output_path) and force:
+        if show_progress:
+            print(f"🔄 {name} - forcing re-download")
+
+    if show_progress:
+        print(
+            f"⬇ {name} ({format_size_bytes(camera_size)})"
+            if camera_size
+            else f"⬇ {name}"
+        )
+
     temp_path = output_path + ".partial"
-    
+
+    temp_path = output_path + ".partial"
+
     for attempt in range(max_retries):
         if show_progress and attempt > 0:
             print(f"Retry attempt {attempt + 1}/{max_retries}...")
-        
+
         try:
             if attempt > 0 and os.path.exists(temp_path):
                 os.remove(temp_path)
-            
+
             result = subprocess.run(
                 ["gphoto2", "--get-file", str(file_num), f"--filename={temp_path}"],
-                capture_output=True, timeout=300
+                capture_output=True,
+                timeout=300,
             )
-            
+
             if result.returncode == 0:
                 if not os.path.exists(temp_path):
                     last_error = "Download completed but temp file not found"
                     continue
-                
+
                 downloaded_size = os.path.getsize(temp_path)
                 if camera_size and downloaded_size != camera_size:
                     last_error = f"Size mismatch: {downloaded_size} vs {camera_size}"
                     continue
-                
+
                 shutil.move(temp_path, output_path)
-                
+
                 # Inject 360 metadata for videos
-                is_video = name.lower().endswith(('.mp4', '.mov', '.avi'))
+                is_video = name.lower().endswith((".mp4", ".mov", ".avi"))
                 if is_video and inject_metadata:
                     if show_progress:
                         print("Injecting 360° metadata for YouTube...")
                     _inject_metadata(output_path)
-                
+
                 if verify:
                     if show_progress:
                         print("Verifying checksum...")
@@ -740,25 +1199,25 @@ def download_file(file_num, output_path, max_retries=3, verify=True, show_progre
                 stderr = result.stderr.decode() if result.stderr else "Unknown error"
                 last_error = f"gphoto2 error: {stderr}"
                 if "timeout" in stderr.lower():
-                    time.sleep(2 ** attempt)
+                    time.sleep(2**attempt)
                     continue
                 else:
                     break
-                    
+
         except subprocess.TimeoutExpired:
             last_error = "Download timeout"
-            time.sleep(2 ** attempt)
+            time.sleep(2**attempt)
             continue
         except Exception as e:
             last_error = f"Exception: {str(e)}"
             continue
-    
+
     if os.path.exists(temp_path):
         try:
             os.remove(temp_path)
         except:
             pass
-    
+
     return False, f"Failed after {max_retries} attempts: {last_error}", None
 
 
@@ -767,12 +1226,19 @@ def _inject_metadata(input_file):
     try:
         temp_output = input_file + ".yt_temp.mp4"
         cmd = [
-            "ffmpeg", "-y", "-i", input_file,
-            "-c", "copy",
-            "-movflags", "+faststart",
-            "-metadata:s:v:0", "spherical=1",
-            "-metadata:s:v:0", "stereo_mode=mono",
-            temp_output
+            "ffmpeg",
+            "-y",
+            "-i",
+            input_file,
+            "-c",
+            "copy",
+            "-movflags",
+            "+faststart",
+            "-metadata:s:v:0",
+            "spherical=1",
+            "-metadata:s:v:0",
+            "stereo_mode=mono",
+            temp_output,
         ]
         result = subprocess.run(cmd, capture_output=True, timeout=120)
         if result.returncode == 0:
@@ -786,100 +1252,388 @@ def _inject_metadata(input_file):
     return False
 
 
+def _check_merge_candidates(filenames, output_dir):
+    """Check if downloaded files are merge candidates and offer to merge"""
+    import re
+
+    # Filter video files only
+    video_files = [
+        f
+        for f in filenames
+        if f.lower().endswith((".mp4", ".mov", ".avi", ".mkv", ".m4v"))
+    ]
+    if len(video_files) < 2:
+        return
+
+    # Sort by filename
+    video_files.sort()
+
+    # Use existing session detection logic
+    [os.path.join(output_dir, f) for f in video_files]
+
+    # Build file_info tuples like _detect_recording_sessions expects
+    file_info = []
+    for f in video_files:
+        path = os.path.join(output_dir, f)
+        # Get basic info without ffprobe for speed
+        info = {
+            "filepath": path,
+            "duration": 0,
+            "creation_time": None,
+            "creation_time_ts": 0,
+            "video_codec": None,
+            "width": 0,
+            "height": 0,
+            "fps": 0,
+        }
+        file_info.append((path, info))
+
+    if len(file_info) < 2:
+        return
+
+    # Simple sequential detection (similar to _detect_recording_sessions but faster)
+    sequences = []
+    current_seq = [file_info[0]]
+
+    for i in range(1, len(file_info)):
+        prev_path, _ = current_seq[-1]
+        curr_path, _ = file_info[i]
+
+        prev_name = Path(prev_path).stem
+        curr_name = Path(curr_path).stem
+
+        # Extract numbers
+        prev_nums = re.findall(r"\d+", prev_name)
+        curr_nums = re.findall(r"\d+", curr_name)
+
+        is_sequential = False
+        if prev_nums and curr_nums:
+            try:
+                prev_num = int(prev_nums[-1])
+                curr_num = int(curr_nums[-1])
+                # Must be consecutive or have small gap (1-2)
+                gap = curr_num - prev_num
+                if 1 <= gap <= 2:
+                    is_sequential = True
+            except ValueError:
+                pass
+
+        if is_sequential:
+            current_seq.append(file_info[i])
+        else:
+            if len(current_seq) >= 2:
+                sequences.append(current_seq)
+            current_seq = [file_info[i]]
+
+    if len(current_seq) >= 2:
+        sequences.append(current_seq)
+
+    if not sequences:
+        return
+
+    # Report merge candidates
+    print()
+    print("=" * 60)
+    print("🎬 Merge Candidates Detected!")
+    print("=" * 60)
+    print()
+    print(f"Found {len(sequences)} sequence(s) that could be merged:")
+
+    for i, seq in enumerate(sequences, 1):
+        names = [Path(p).name for p, _ in seq]
+        print(f"\n  Sequence {i}: {len(seq)} files")
+        for name in names:
+            size = ""
+            try:
+                path = os.path.join(output_dir, name)
+                if os.path.exists(path):
+                    size = format_size_bytes(os.path.getsize(path))
+                    size = f" ({size})"
+            except:
+                pass
+            print(f"    • {name}{size}")
+
+    print()
+    print("These files have sequential numbering and may be")
+    print("parts of a single recording session.")
+    print()
+
+    # Show merge command
+    for i, seq in enumerate(sequences, 1):
+        names = [Path(p).name for p, _ in seq]
+        first_name = names[0]
+
+        # Create output name
+        stem = Path(first_name).stem
+        output_name = f"{stem}_merged.mp4"
+
+        print(f"To merge Sequence {i}:")
+        files_arg = " ".join(f'"{os.path.join(output_dir, n)}"' for n in names)
+        print(f'  km360 merge -o "{os.path.join(output_dir, output_name)}" {files_arg}')
+        print()
+        print("Or with auto-detection:")
+        # Get pattern from first file
+        prefix = re.sub(r"\d+.*", "", stem)
+        ext = Path(first_name).suffix
+        print(
+            f'  km360 merge --auto -o "{os.path.join(output_dir, output_name)}" "{os.path.join(output_dir, prefix)}*{ext}"'
+        )
+        print()
+
+
 def cmd_download(args):
     """Download files from camera"""
     print("=" * 60)
     print("Nikon KeyMission 360 - Download Tool")
     print("=" * 60)
     print()
-    
+
     if not check_gphoto2():
         print("[!] gphoto2 not installed!")
         return 1
-    
+
     if not detect_camera():
         print("[!] Camera not found!")
         return 1
-    
+
     output_dir = args.output or "."
     os.makedirs(output_dir, exist_ok=True)
-    
+
     if args.all:
         # Download all files
         result = subprocess.run(
-            ["gphoto2", "--list-files"],
-            capture_output=True, text=True, timeout=30
+            ["gphoto2", "--list-files"], capture_output=True, text=True, timeout=30
         )
-        
+
         files = []
-        for line in result.stdout.split('\n'):
-            if line.strip().startswith('#'):
+        for line in result.stdout.split("\n"):
+            if line.strip().startswith("#"):
                 parts = line.strip().split()
                 if len(parts) >= 2:
                     num = int(parts[0][1:])
                     name = parts[1]
                     files.append((num, name))
-        
+
         if not files:
             print("No files found on camera.")
             return 0
-        
+
         print(f"Found {len(files)} files to download.\n")
-        
+
         success_count = 0
         failed_files = []
-        
-        for i, (num, name) in enumerate(files, 1):
-            print(f"[{i}/{len(files)}] ", end="")
+
+        # First pass: identify which files already exist
+        existing_files = []
+        files_to_download = []
+
+        for num, name in files:
             output_path = os.path.join(output_dir, name)
-            
+            if os.path.exists(output_path) and not args.force and not args.no_skip:
+                existing_files.append((num, name, output_path))
+            else:
+                files_to_download.append((num, name, output_path))
+
+        if existing_files:
+            print(
+                f"Found {len(existing_files)} existing file(s) (will skip unless --force):"
+            )
+            for _, name, _ in existing_files[:5]:
+                print(f"  ⏭ {name}")
+            if len(existing_files) > 5:
+                print(f"  ... and {len(existing_files) - 5} more")
+            print()
+
+        print(f"Downloading {len(files_to_download)} file(s)...\n")
+
+        for i, (num, name, output_path) in enumerate(files_to_download, 1):
+            print(f"[{i}/{len(files_to_download)}] ", end="")
+
             success, message, checksum = download_file(
-                num, output_path, 
+                num,
+                output_path,
                 max_retries=args.retries,
                 verify=not args.no_verify,
                 show_progress=False,
-                inject_metadata=not args.no_metadata
+                inject_metadata=not args.no_metadata,
+                force=args.force or args.no_skip,
             )
-            
+
             if success:
-                print(f"✓ {name} - {message}")
+                print(f"{message}")
                 success_count += 1
             else:
                 print(f"✗ {name} - {message}")
                 failed_files.append((name, message))
-        
-        print(f"\n{'='*50}")
+
+        # Verify existing files if requested
+        if existing_files and not args.no_verify and not args.force:
+            print(f"\nVerifying {len(existing_files)} existing file(s)...")
+            for num, name, output_path in existing_files:
+                checksum = calculate_checksum(output_path)
+                if checksum:
+                    success_count += 1
+
+        print(f"\n{'=' * 50}")
         print(f"Complete: {success_count}/{len(files)} files")
-        
+
         if failed_files:
-            print(f"\nFailed files:")
+            print("\nFailed files:")
             for name, error in failed_files:
                 print(f"  • {name}: {error}")
-        
+
+        # Check for merge candidates among downloaded files
+        if not args.no_merge_check and files_to_download:
+            _check_merge_candidates([f[1] for f in files_to_download], output_dir)
+
         return 0 if not failed_files else 1
-    
+
     elif args.file_num:
         # Download single file
         name, _ = get_file_info(args.file_num)
         if not name:
             print(f"[!] File #{args.file_num} not found on camera")
             return 1
-        
+
         output_path = args.output or name
         if os.path.isdir(output_path):
             output_path = os.path.join(output_path, name)
-        
+
         success, message, checksum = download_file(
-            args.file_num, output_path,
+            args.file_num,
+            output_path,
             max_retries=args.retries,
             verify=not args.no_verify,
             show_progress=True,
-            inject_metadata=not args.no_metadata
+            inject_metadata=not args.no_metadata,
+            force=args.force or args.no_skip,
         )
-        
+
         print(f"\n{message}")
         return 0 if success else 1
-    
+
+    else:
+        print("[!] Please specify a file number or use --all")
+        return 1
+
+
+# =============================================================================
+# DELETE Command
+# =============================================================================
+
+
+def cmd_delete(args):
+    """Delete file(s) from camera"""
+    print("=" * 60)
+    print("Nikon KeyMission 360 - Delete Tool")
+    print("=" * 60)
+    print()
+
+    if not check_gphoto2():
+        print("[!] gphoto2 not installed!")
+        return 1
+
+    if not detect_camera():
+        print("[!] Camera not found!")
+        return 1
+
+    if args.all:
+        # Delete all files
+        result = subprocess.run(
+            ["gphoto2", "--list-files"], capture_output=True, text=True, timeout=30
+        )
+
+        files = []
+        for line in result.stdout.split("\n"):
+            if line.strip().startswith("#"):
+                parts = line.strip().split()
+                if len(parts) >= 2:
+                    num = int(parts[0][1:])
+                    name = parts[1]
+                    files.append((num, name))
+
+        if not files:
+            print("No files found on camera.")
+            return 0
+
+        if not args.force:
+            print(f"About to delete {len(files)} file(s) from camera:")
+            for num, name in files[:5]:
+                print(f"  • {name}")
+            if len(files) > 5:
+                print(f"  ... and {len(files) - 5} more")
+
+            response = input("\nAre you sure? [yes/no]: ")
+            if response.lower() != "yes":
+                print("Cancelled.")
+                return 0
+
+        # One camera-native operation avoids invalidating per-file indices as
+        # earlier objects disappear. Re-query so success means actually empty.
+        result = subprocess.run(
+            ["gphoto2", "--delete-all-files", "--recurse"],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        if result.returncode != 0:
+            print(f"Delete failed: {result.stderr.strip()}", file=sys.stderr)
+            return 1
+        remaining = subprocess.run(
+            ["gphoto2", "--list-files"], capture_output=True, text=True, timeout=30
+        )
+        count = sum(
+            1 for line in remaining.stdout.splitlines() if line.lstrip().startswith("#")
+        )
+        if count:
+            print(
+                f"Delete was incomplete: camera still reports {count} object(s)",
+                file=sys.stderr,
+            )
+            return 1
+        print(f"Deleted {len(files)} file(s); camera reports empty.")
+        return 0
+
+    elif args.file_num:
+        # Delete single file
+        name, _ = get_file_info(args.file_num)
+        if not name:
+            print(f"[!] File #{args.file_num} not found on camera")
+            return 1
+
+        if not args.force:
+            print(f"About to delete: {name}")
+            response = input("Are you sure? [yes/no]: ")
+            if response.lower() != "yes":
+                print("Cancelled.")
+                return 0
+
+        print(f"Deleting {name}...")
+        result = subprocess.run(
+            ["gphoto2", "--delete-file", str(args.file_num)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+
+        if result.returncode == 0:
+            # File numbers are ephemeral. Confirm by name after deletion.
+            check = subprocess.run(
+                ["gphoto2", "--list-files"], capture_output=True, text=True, timeout=30
+            )
+            if any(
+                line.split()[1] == name
+                for line in check.stdout.splitlines()
+                if line.lstrip().startswith("#") and len(line.split()) > 1
+            ):
+                print(f"✗ Camera still reports: {name}", file=sys.stderr)
+                return 1
+            print(f"✓ Deleted: {name}")
+            return 0
+        else:
+            print(f"✗ Failed: {result.stderr}")
+            return 1
+
     else:
         print("[!] Please specify a file number or use --all")
         return 1
@@ -889,17 +1643,21 @@ def cmd_download(args):
 # RESET Command
 # =============================================================================
 
+
 def find_usb_camera():
     """Find camera USB device"""
     if USB1_AVAILABLE:
         try:
             context = usb1.USBContext()
             for device in context.getDeviceIterator(skip_on_error=True):
-                if device.getVendorID() == VENDOR_ID and device.getProductID() == PRODUCT_ID:
+                if (
+                    device.getVendorID() == VENDOR_ID
+                    and device.getProductID() == PRODUCT_ID
+                ):
                     return device.getBusNumber(), device.getDeviceAddress()
         except:
             pass
-    
+
     if PYUSB_AVAILABLE:
         try:
             dev = usb.core.find(idVendor=VENDOR_ID, idProduct=PRODUCT_ID)
@@ -907,52 +1665,138 @@ def find_usb_camera():
                 return 0, 0
         except:
             pass
-    
+
     return None, None
 
 
 def cmd_reset(args):
-    """Reset USB port"""
-    print("=" * 50)
+    """Reset USB port with smart dependency handling"""
+    print("=" * 60)
     print("KeyMission 360 USB Port Reset")
-    print("=" * 50)
-    
+    print("=" * 60)
+
+    # First check dependencies
+    has_libusb = KM360DepManager.check("libusb1")
+    has_usbreset = shutil.which("usbreset") is not None
+
+    if not has_libusb and not args.force:
+        print("\n⚠ USB library not installed (libusb1)")
+        print("  This is needed for the most reliable reset method.")
+
+        # Check if running interactively
+        is_interactive = sys.stdin.isatty() if hasattr(sys.stdin, "isatty") else False
+
+        if args.auto_install:
+            # Auto-install without prompting
+            print("\n  Auto-installing libusb1 (use --auto-install)...")
+            if KM360DepManager.install("libusb1", auto=True):
+                print("  ✓ libusb1 installed. Please restart km360.")
+                return 0
+            else:
+                print("  ✗ Could not install libusb1 automatically.")
+                print("    Try: pip install libusb1")
+        elif is_interactive:
+            try:
+                resp = input("\nInstall libusb1 now? [Y/n]: ")
+                if resp.lower() not in ["n", "no"]:
+                    if KM360DepManager.install("libusb1", auto=False):
+                        print("✓ libusb1 installed. Please restart km360.")
+                        return 0
+                    else:
+                        print("✗ Could not install libusb1 automatically.")
+                        print("  Try: pip install libusb1")
+            except EOFError:
+                # Non-interactive mode, skip the prompt
+                print("\n  (Running non-interactively, skipping install prompt)")
+                print("  Install manually: pip install libusb1")
+                print("  Or use: km360 reset --auto-install")
+        else:
+            print("\n  (Install with: pip install libusb1)")
+            print("  Or use: km360 reset --auto-install")
+
     bus, addr = find_usb_camera()
-    
+
     if bus is None:
         print("\n⚠ Camera not found on USB bus.")
         print("   Make sure the camera is connected and powered on.")
+        print("\nTroubleshooting:")
+        print("  1. Check USB cable connection")
+        print("  2. Press the Photo or Video button on camera to wake it up")
+        print("  3. Try: km360 deps --check --usb-reset")
         return 1
-    
+
     print(f"\nFound camera at Bus {bus}, Address {addr}")
-    
+
+    # Show available reset methods
+    print("\nAvailable reset methods:")
+    methods = []
+
+    if has_libusb:
+        print("  [✓] USB library reset (preferred)")
+        methods.append("libusb")
+    else:
+        print("  [✗] USB library reset (install: pip install libusb1)")
+
+    if has_usbreset:
+        print("  [✓] usbreset utility")
+        methods.append("usbreset")
+    else:
+        print("  [ ] usbreset utility (optional, package: usbutils)")
+
+    print("  [✓] sysfs authorized toggle (may need sudo)")
+    methods.append("sysfs")
+
+    if not methods:
+        print("\n✗ No automatic reset methods available!")
+        print("Install libusb1 for automatic reset:")
+        print("  pip install libusb1")
+        return 1
+
     if not args.force:
-        response = input("\nReset USB port? This will briefly disconnect the camera. [y/N]: ")
-        if response.lower() != 'y':
-            print("Cancelled.")
-            return 0
-    
+        is_interactive = sys.stdin.isatty() if hasattr(sys.stdin, "isatty") else False
+        if is_interactive:
+            try:
+                response = input(
+                    "\nReset USB port? This will briefly disconnect the camera. [y/N]: "
+                )
+                if response.lower() != "y":
+                    print("Cancelled.")
+                    return 0
+            except EOFError:
+                print("\n(Running non-interactively, use --force to skip confirmation)")
+                return 1
+        else:
+            print("\n(Non-interactive mode, use --force to skip confirmation)")
+            return 1
+
     print("\nAttempting USB reset...")
-    
-    # Try pyusb reset
-    if PYUSB_AVAILABLE:
+
+    # Try methods in order of preference
+
+    # Method 1: libusb1/pyusb (most reliable)
+    if has_libusb:
         try:
+            print("  Trying USB library reset...")
+            import usb.core
+
             dev = usb.core.find(idVendor=VENDOR_ID, idProduct=PRODUCT_ID)
             if dev:
                 dev.reset()
                 print("\n✓ USB device reset successful!")
                 print("  Wait a few seconds for the camera to reconnect.")
                 return 0
+        except ImportError:
+            pass  # Try next method
         except Exception as e:
-            print(f"pyusb reset failed: {e}")
-    
-    # Try usbreset command
-    if bus and addr:
+            print(f"    USB library reset failed: {e}")
+
+    # Method 2: usbreset command
+    if has_usbreset and bus and addr:
         try:
+            print("  Trying usbreset utility...")
             usbdev = f"/dev/bus/usb/{bus:03d}/{addr:03d}"
             result = subprocess.run(
-                ["usbreset", usbdev],
-                capture_output=True, text=True, timeout=10
+                ["usbreset", usbdev], capture_output=True, text=True, timeout=10
             )
             if result.returncode == 0:
                 print("\n✓ USB device reset successful!")
@@ -961,46 +1805,63 @@ def cmd_reset(args):
         except FileNotFoundError:
             pass
         except Exception as e:
-            print(f"usbreset failed: {e}")
-    
-    # Try sysfs authorized toggle
+            print(f"    usbreset failed: {e}")
+
+    # Method 3: sysfs authorized toggle
     if bus and addr:
         try:
+            print("  Trying sysfs authorized toggle...")
+            # Find the device path
             result = subprocess.run(
                 ["find", "/sys/bus/usb/devices", "-name", f"*:{addr}"],
-                capture_output=True, text=True, timeout=5
+                capture_output=True,
+                text=True,
+                timeout=5,
             )
-            for path in result.stdout.strip().split('\n'):
+            for path in result.stdout.strip().split("\n"):
                 if path:
                     auth_path = path + "/authorized"
                     try:
-                        with open(auth_path, 'w') as f:
-                            f.write('0')
-                        with open(auth_path, 'w') as f:
-                            f.write('1')
-                        print("\n✓ USB device reset successful (authorized toggle)!")
+                        with open(auth_path, "w") as f:
+                            f.write("0")
+                        time.sleep(0.5)
+                        with open(auth_path, "w") as f:
+                            f.write("1")
+                        print("\n✓ USB device reset successful!")
                         print("  Wait a few seconds for the camera to reconnect.")
                         return 0
                     except PermissionError:
-                        print(f"Permission denied on {auth_path}, try with sudo")
+                        print("    Permission denied (try with sudo)")
                     except Exception as e:
-                        print(f"Error toggling authorized: {e}")
+                        print(f"    Error: {e}")
         except Exception as e:
-            print(f"auth_unbind failed: {e}")
-    
+            print(f"    sysfs toggle failed: {e}")
+
+    # All methods failed
     print("\n✗ Automatic reset failed.")
     print("\nManual reset options:")
     print("  1. Unplug and replug the USB cable")
     if bus and addr:
         print(f"  2. Run: sudo usbreset /dev/bus/usb/{bus:03d}/{addr:03d}")
-    print("  3. Run this command with sudo")
-    
+    print("  3. Run: sudo km360 reset --force")
+    print("  4. Install udev rules for non-root access:")
+    print("     km360 install --udev")
+
+    # Check udev rules
+    udev_path = Path("/etc/udev/rules.d/99-keymission360.rules")
+    if not udev_path.exists():
+        print("\n⚠ Tip: udev rules not installed - USB reset may need sudo")
+        resp = input("Install udev rules now? [y/N]: ")
+        if resp.lower() in ["y", "yes"]:
+            return cmd_install(argparse.Namespace(remove=False, udev=True))
+
     return 1
 
 
 # =============================================================================
 # VIEWER Command
 # =============================================================================
+
 
 def cmd_viewer(args):
     """Launch 360° viewer"""
@@ -1013,13 +1874,14 @@ def cmd_viewer(args):
         print(f"[!] Missing dependency: {e}")
         print("    Install with: pip install numpy pillow")
         return 1
-    
+
     try:
         import cv2
+
         VIDEO_SUPPORT = True
     except ImportError:
         VIDEO_SUPPORT = False
-    
+
     class EquirectangularProjector:
         def __init__(self, width=800, height=600, fov=90):
             self.width = width
@@ -1027,108 +1889,116 @@ def cmd_viewer(args):
             self.fov = math.radians(fov)
             self.yaw = 0
             self.pitch = 0
-        
+
         def rotate(self, delta_yaw, delta_pitch):
             self.yaw += delta_yaw
             self.pitch += delta_pitch
-            self.pitch = max(-math.pi/2 + 0.01, min(math.pi/2 - 0.01, self.pitch))
-        
+            self.pitch = max(-math.pi / 2 + 0.01, min(math.pi / 2 - 0.01, self.pitch))
+
         def zoom(self, factor):
             self.fov *= factor
             self.fov = max(math.radians(30), min(math.radians(120), self.fov))
-        
+
         def project(self, eq_img):
             if isinstance(eq_img, Image.Image):
                 eq_array = np.array(eq_img)
             else:
                 eq_array = eq_img
-            
+
             eq_h, eq_w = eq_array.shape[:2]
             out = np.zeros((self.height, self.width, 3), dtype=np.uint8)
-            
+
             f = (self.width / 2) / math.tan(self.fov / 2)
             cx, cy = self.width / 2, self.height / 2
-            
+
             cos_yaw, sin_yaw = math.cos(self.yaw), math.sin(self.yaw)
             cos_pitch, sin_pitch = math.cos(self.pitch), math.sin(self.pitch)
-            
+
             x_coords = np.arange(self.width) - cx
             y_coords = np.arange(self.height) - cy
             xv, yv = np.meshgrid(x_coords, y_coords)
-            
+
             z = np.full_like(xv, f, dtype=np.float32)
             x = xv.astype(np.float32)
             y = yv.astype(np.float32)
-            
-            norm = np.sqrt(x*x + y*y + z*z)
-            x, y, z = x/norm, y/norm, z/norm
-            
+
+            norm = np.sqrt(x * x + y * y + z * z)
+            x, y, z = x / norm, y / norm, z / norm
+
             y_rot = y * cos_pitch - z * sin_pitch
             z_rot = y * sin_pitch + z * cos_pitch
             y, z = y_rot, z_rot
-            
+
             x_rot = x * cos_yaw - z * sin_yaw
             z_rot = x * sin_yaw + z * cos_yaw
             x, z = x_rot, z_rot
-            
+
             theta = np.arctan2(x, z)
             phi = np.arcsin(y)
-            
+
             eq_x = ((theta / math.pi + 1) / 2 * (eq_w - 1)).astype(np.int32)
-            eq_y = ((-phi / (math.pi/2) + 1) / 2 * (eq_h - 1)).astype(np.int32)
-            
+            eq_y = ((-phi / (math.pi / 2) + 1) / 2 * (eq_h - 1)).astype(np.int32)
+
             eq_x = np.clip(eq_x, 0, eq_w - 1)
             eq_y = np.clip(eq_y, 0, eq_h - 1)
-            
+
             out = eq_array[eq_y, eq_x]
             return Image.fromarray(out)
-    
+
     class Viewer360:
         def __init__(self, root, file_path=None):
             self.root = root
             self.root.title("KeyMission 360 Viewer")
             self.root.geometry("1000x700")
-            
+
             self.file_path = file_path
             self.is_video = False
             self.video_capture = None
             self.current_frame = None
             self.playing = False
             self.projector = EquirectangularProjector(width=800, height=600)
-            
+
             self.dragging = False
             self.last_x = 0
             self.last_y = 0
             self.sensitivity = 0.005
-            
+
             self.setup_ui()
-            
+
             if file_path:
                 self.load_file(file_path)
-            
+
             self.bind_controls()
             self.update()
-        
+
         def setup_ui(self):
             main_frame = ttk.Frame(self.root)
             main_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-            
-            self.canvas = tk.Canvas(main_frame, width=800, height=600, bg='black')
+
+            self.canvas = tk.Canvas(main_frame, width=800, height=600, bg="black")
             self.canvas.pack(fill=tk.BOTH, expand=True)
-            
+
             controls = ttk.Frame(main_frame)
             controls.pack(fill=tk.X, pady=5)
-            
-            ttk.Button(controls, text="Open File", command=self.open_file).pack(side=tk.LEFT, padx=5)
+
+            ttk.Button(controls, text="Open File", command=self.open_file).pack(
+                side=tk.LEFT, padx=5
+            )
             self.play_btn = ttk.Button(controls, text="Play", command=self.toggle_play)
             self.play_btn.pack(side=tk.LEFT, padx=5)
             self.play_btn.config(state=tk.DISABLED)
-            ttk.Button(controls, text="Reset View", command=self.reset_view).pack(side=tk.LEFT, padx=5)
-            
-            status = ttk.Label(self.root, text="Drag to look • Scroll to zoom • Arrows/WASD to look • +/- to zoom • R to reset • Q to quit",
-                              relief=tk.SUNKEN, anchor=tk.W)
+            ttk.Button(controls, text="Reset View", command=self.reset_view).pack(
+                side=tk.LEFT, padx=5
+            )
+
+            status = ttk.Label(
+                self.root,
+                text="Drag to look • Scroll to zoom • Arrows/WASD to look • +/- to zoom • R to reset • Q to quit",
+                relief=tk.SUNKEN,
+                anchor=tk.W,
+            )
             status.pack(side=tk.BOTTOM, fill=tk.X)
-        
+
         def bind_controls(self):
             self.canvas.bind("<Button-1>", self.on_mouse_down)
             self.canvas.bind("<B1-Motion>", self.on_mouse_drag)
@@ -1136,7 +2006,7 @@ def cmd_viewer(args):
             self.canvas.bind("<MouseWheel>", self.on_scroll)
             self.canvas.bind("<Button-4>", self.on_scroll)
             self.canvas.bind("<Button-5>", self.on_scroll)
-            
+
             self.root.bind("<Left>", lambda e: self.rotate(-0.1, 0))
             self.root.bind("<Right>", lambda e: self.rotate(0.1, 0))
             self.root.bind("<Up>", lambda e: self.rotate(0, 0.1))
@@ -1153,16 +2023,16 @@ def cmd_viewer(args):
             self.root.bind("<Q>", lambda e: self.root.quit())
             self.root.bind("<Escape>", lambda e: self.root.quit())
             self.root.bind("<space>", lambda e: self.toggle_play())
-        
+
         def load_file(self, path):
             self.file_path = path
-            ext = path.lower().split('.')[-1]
-            
-            if ext in ['mp4', 'mov', 'avi']:
+            ext = path.lower().split(".")[-1]
+
+            if ext in ["mp4", "mov", "avi"]:
                 self.load_video(path)
             else:
                 self.load_image(path)
-        
+
         def load_image(self, path):
             try:
                 self.current_frame = Image.open(path)
@@ -1171,56 +2041,57 @@ def cmd_viewer(args):
                 self.render()
             except Exception as e:
                 print(f"Error loading image: {e}")
-        
+
         def load_video(self, path):
             if not VIDEO_SUPPORT:
                 print("Video support not available. Install opencv-python")
                 return
-            
+
             try:
                 if self.video_capture:
                     self.video_capture.release()
-                
+
                 self.video_capture = cv2.VideoCapture(path)
                 self.is_video = True
                 self.playing = True
                 self.play_btn.config(state=tk.NORMAL, text="Pause")
-                
+
                 ret, frame = self.video_capture.read()
                 if ret:
                     self.current_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                     self.render()
             except Exception as e:
                 print(f"Error loading video: {e}")
-        
+
         def open_file(self):
             from tkinter import filedialog
+
             path = filedialog.askopenfilename(
                 title="Open 360° Image or Video",
                 filetypes=[
                     ("360° Media", "*.jpg *.jpeg *.png *.mp4 *.mov *.avi"),
                     ("Images", "*.jpg *.jpeg *.png"),
                     ("Videos", "*.mp4 *.mov *.avi"),
-                    ("All Files", "*.*")
-                ]
+                    ("All Files", "*.*"),
+                ],
             )
             if path:
                 self.load_file(path)
-        
+
         def render(self):
             if self.current_frame is None:
                 return
-            
+
             projected = self.projector.project(self.current_frame)
             self.tk_image = ImageTk.PhotoImage(projected)
-            
+
             self.canvas.delete("all")
             self.canvas.create_image(
                 self.canvas.winfo_width() // 2,
                 self.canvas.winfo_height() // 2,
-                image=self.tk_image
+                image=self.tk_image,
             )
-        
+
         def update(self):
             if self.is_video and self.playing and self.video_capture:
                 ret, frame = self.video_capture.read()
@@ -1229,14 +2100,14 @@ def cmd_viewer(args):
                     self.render()
                 else:
                     self.video_capture.set(cv2.CAP_PROP_POS_FRAMES, 0)
-            
+
             self.root.after(33, self.update)
-        
+
         def on_mouse_down(self, event):
             self.dragging = True
             self.last_x = event.x
             self.last_y = event.y
-        
+
         def on_mouse_drag(self, event):
             if not self.dragging:
                 return
@@ -1245,38 +2116,38 @@ def cmd_viewer(args):
             self.rotate(dx * self.sensitivity, -dy * self.sensitivity)
             self.last_x = event.x
             self.last_y = event.y
-        
+
         def on_mouse_up(self, event):
             self.dragging = False
-        
+
         def on_scroll(self, event):
-            if event.num == 4 or (hasattr(event, 'delta') and event.delta > 0):
+            if event.num == 4 or (hasattr(event, "delta") and event.delta > 0):
                 self.zoom(0.9)
-            elif event.num == 5 or (hasattr(event, 'delta') and event.delta < 0):
+            elif event.num == 5 or (hasattr(event, "delta") and event.delta < 0):
                 self.zoom(1.1)
-        
+
         def rotate(self, yaw_delta, pitch_delta):
             self.projector.rotate(yaw_delta, pitch_delta)
             self.render()
-        
+
         def zoom(self, factor):
             self.projector.zoom(factor)
             self.render()
-        
+
         def reset_view(self):
             self.projector.yaw = 0
             self.projector.pitch = 0
             self.projector.fov = math.radians(90)
             self.render()
-        
+
         def toggle_play(self):
             if not self.is_video:
                 return
             self.playing = not self.playing
             self.play_btn.config(text="Pause" if self.playing else "Play")
-    
+
     root = tk.Tk()
-    app = Viewer360(root, args.file)
+    Viewer360(root, args.file)
     root.mainloop()
     return 0
 
@@ -1285,37 +2156,41 @@ def cmd_viewer(args):
 # YOUTUBE Command
 # =============================================================================
 
+
 def cmd_youtube(args):
     """Inject 360° metadata for YouTube"""
     print("=" * 60)
     print("KeyMission 360 YouTube Export")
     print("=" * 60)
     print()
-    
+
     if not args.input:
         print("[!] Please specify an input file or directory")
         return 1
-    
+
     if args.batch:
         # Batch process directory
-        video_exts = ['.mp4', '.mov', '.avi', '.mkv', '.m4v', '.3gp']
-        video_files = [f for f in Path(args.input).iterdir() 
-                      if f.suffix.lower() in video_exts]
-        
+        video_exts = [".mp4", ".mov", ".avi", ".mkv", ".m4v", ".3gp"]
+        video_files = [
+            f for f in Path(args.input).iterdir() if f.suffix.lower() in video_exts
+        ]
+
         if not video_files:
             print(f"No video files found in {args.input}")
             return 0
-        
+
         print(f"Found {len(video_files)} videos to process")
         print()
-        
+
         success_count = 0
         tagged_count = 0
         failed_count = 0
-        
+
         for i, video_file in enumerate(video_files, 1):
             print(f"[{i}/{len(video_files)}] Processing: {video_file.name}")
-            success, msg = _process_youtube_file(str(video_file), in_place=args.in_place)
+            success, msg = _process_youtube_file(
+                str(video_file), in_place=args.in_place
+            )
             if success:
                 if msg == "already_tagged":
                     tagged_count += 1
@@ -1325,13 +2200,17 @@ def cmd_youtube(args):
                 failed_count += 1
                 print(f"  ✗ Failed: {msg}")
             print()
-        
-        print(f"Done! {success_count} tagged, {tagged_count} already had tags, {failed_count} failed")
+
+        print(
+            f"Done! {success_count} tagged, {tagged_count} already had tags, {failed_count} failed"
+        )
         return 0 if failed_count == 0 else 1
-    
+
     else:
         # Single file
-        success, msg = _process_youtube_file(args.input, args.output, in_place=args.in_place)
+        success, msg = _process_youtube_file(
+            args.input, args.output, in_place=args.in_place
+        )
         if success:
             print("\n✓ Export complete!")
             print("\nUpload to YouTube and it will automatically recognize")
@@ -1345,20 +2224,27 @@ def cmd_youtube(args):
 def _process_youtube_file(input_file, output_file=None, in_place=False):
     """Process a single video file for YouTube 360° metadata"""
     input_path = Path(input_file)
-    
+
     if not input_path.exists():
         return False, f"File not found: {input_file}"
-    
-    if input_path.suffix.lower() not in ['.mp4', '.mov', '.avi', '.mkv', '.m4v', '.3gp']:
+
+    if input_path.suffix.lower() not in [
+        ".mp4",
+        ".mov",
+        ".avi",
+        ".mkv",
+        ".m4v",
+        ".3gp",
+    ]:
         return False, f"Unsupported format: {input_path.suffix}"
-    
+
     # Determine output path
     if output_file is None:
         if in_place:
             output_file = input_file
         else:
-            output_file = str(input_path.with_suffix('')) + "_youtube.mp4"
-    
+            output_file = str(input_path.with_suffix("")) + "_youtube.mp4"
+
     # Check for exiftool first (preferred method)
     exiftool_path = None
     for path in ["exiftool", "/usr/bin/exiftool", "/usr/local/bin/exiftool"]:
@@ -1369,7 +2255,7 @@ def _process_youtube_file(input_file, output_file=None, in_place=False):
                 break
         except:
             continue
-    
+
     if exiftool_path and in_place:
         # Use exiftool for in-place modification
         try:
@@ -1381,37 +2267,49 @@ def _process_youtube_file(input_file, output_file=None, in_place=False):
                 "-XMP-GSpherical:ProjectionType=equirectangular",
                 "-XMP-GSpherical:StereoMode=mono",
                 "-overwrite_original",
-                input_file
+                input_file,
             ]
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
             if result.returncode == 0:
-                print(f"  ✓ Metadata injected (exiftool)")
+                print("  ✓ Metadata injected (exiftool)")
                 return True, "success"
             else:
-                error_msg = result.stderr.strip() if result.stderr else "exiftool failed"
+                error_msg = (
+                    result.stderr.strip() if result.stderr else "exiftool failed"
+                )
                 return False, error_msg
         except Exception as e:
             return False, str(e)
-    
+
     # Fallback to ffmpeg (creates new file)
-    temp_output = output_file + ".temp.mp4" if output_file == input_file else output_file
-    
+    temp_output = (
+        output_file + ".temp.mp4" if output_file == input_file else output_file
+    )
+
     try:
         cmd = [
-            "ffmpeg", "-y", "-i", input_file,
-            "-c", "copy",
-            "-movflags", "+faststart",
-            "-metadata:s:v:0", "spherical=1",
-            "-metadata:s:v:0", "stereo_mode=mono",
-            "-metadata:s:v:0", "projection_type=equirectangular",
-            temp_output
+            "ffmpeg",
+            "-y",
+            "-i",
+            input_file,
+            "-c",
+            "copy",
+            "-movflags",
+            "+faststart",
+            "-metadata:s:v:0",
+            "spherical=1",
+            "-metadata:s:v:0",
+            "stereo_mode=mono",
+            "-metadata:s:v:0",
+            "projection_type=equirectangular",
+            temp_output,
         ]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-        
+
         if result.returncode == 0:
             if temp_output != output_file:
                 shutil.move(temp_output, output_file)
-            print(f"  ✓ Metadata injected (ffmpeg)")
+            print("  ✓ Metadata injected (ffmpeg)")
             return True, "success"
         else:
             if os.path.exists(temp_output):
@@ -1422,8 +2320,631 @@ def _process_youtube_file(input_file, output_file=None, in_place=False):
 
 
 # =============================================================================
+# MERGE Command
+# =============================================================================
+
+
+def cmd_merge(args):
+    """
+    Losslessly merge/concatenate video files while preserving 360° metadata.
+
+    This command uses ffmpeg's concat demuxer to losslessly merge videos
+    without re-encoding. It also preserves or re-injects 360° spherical
+    metadata so YouTube will recognize the merged video as 360° content.
+
+    Smart Auto-detection:
+      By default, the tool analyzes input files to detect if they appear
+      to be parts of a single recording session. Use --auto to force
+      auto-detection, or --no-auto to disable it.
+
+      Detection criteria:
+      - Sequential file naming (e.g., DSCN0016.MP4, DSCN0017.MP4)
+      - Similar creation timestamps (within gap-tolerance)
+      - Matching video parameters (codec, resolution, frame rate)
+    """
+    print("=" * 60)
+    print("KeyMission 360 - Video Merge Tool")
+    print("=" * 60)
+    print()
+
+    if not args.inputs:
+        print("[!] No input files specified")
+        return 1
+
+    # Expand any glob patterns and validate files
+    input_files = []
+    for pattern in args.inputs:
+        expanded = glob.glob(pattern)
+        if expanded:
+            input_files.extend(expanded)
+        elif os.path.exists(pattern):
+            input_files.append(pattern)
+
+    if not input_files:
+        print("[!] No valid input files found")
+        return 1
+
+    # Sort and deduplicate
+    input_files = sorted(set(input_files))
+
+    # Smart auto-detection
+    use_auto = args.auto
+    if not args.no_auto and not args.auto and len(input_files) >= 2:
+        # Check if files look like they might be sequential
+        first_name = Path(input_files[0]).stem
+        last_name = Path(input_files[-1]).stem
+
+        # Extract numbers from filenames
+        import re
+
+        first_nums = re.findall(r"\d+", first_name)
+        last_nums = re.findall(r"\d+", last_name)
+
+        if first_nums and last_nums:
+            first_seq = int(first_nums[-1])
+            last_seq = int(last_nums[-1])
+
+            # If sequential-looking files with gaps or many files
+            if last_seq > first_seq and len(input_files) >= 2:
+                gap = last_seq - first_seq + 1
+                if gap > len(input_files) or len(input_files) > 3:
+                    print(
+                        f"Detected {len(input_files)} files with sequence numbers {first_seq} to {last_seq}"
+                    )
+                    if not args.force:
+                        resp = input(
+                            "Use smart auto-detection to find continuous recording sessions? [Y/n]: "
+                        )
+                        if resp.lower() not in ["n", "no"]:
+                            use_auto = True
+                    else:
+                        use_auto = True
+
+    # Auto-detect mode - find related files
+    if use_auto:
+        print("\nRunning auto-detection for recording sessions...")
+        input_files = _detect_recording_sessions(input_files, args.gap_tolerance)
+        if not input_files:
+            print("[!] No files found that match the auto-detection criteria")
+            return 1
+        print()
+
+    # Validate all input files exist and are videos
+    valid_files = []
+    for f in input_files:
+        path = Path(f)
+        if not path.exists():
+            print(f"[!] File not found: {f}")
+            continue
+        if path.suffix.lower() not in [".mp4", ".mov", ".avi", ".mkv", ".m4v", ".3gp"]:
+            print(f"[!] Skipping non-video file: {f}")
+            continue
+        valid_files.append(f)
+
+    if len(valid_files) < 2:
+        print("[!] Need at least 2 video files to merge")
+        return 1
+
+    input_files = valid_files
+
+    print(f"Files to merge ({len(input_files)}):")
+    total_size = 0
+    for i, f in enumerate(input_files, 1):
+        size = Path(f).stat().st_size
+        total_size += size
+        print(f"  {i}. {Path(f).name} ({format_size_bytes(size)})")
+    print(f"\nTotal input size: {format_size_bytes(total_size)}")
+    print(f"Output: {args.output}")
+    print()
+
+    # Detect-only mode
+    if args.detect_only:
+        print("[Detect-only mode] The following files would be merged:")
+        for f in input_files:
+            print(f"  - {f}")
+        return 0
+
+    # Check output file doesn't exist
+    output_path = Path(args.output)
+    if output_path.exists():
+        response = input(
+            f"[!] Output file exists: {args.output}\n    Overwrite? (y/N): "
+        )
+        if response.lower() != "y":
+            print("Cancelled.")
+            return 0
+
+    # Check ffmpeg
+    try:
+        result = subprocess.run(["ffmpeg", "-version"], capture_output=True, timeout=5)
+        if result.returncode != 0:
+            print("[!] ffmpeg not found. Please install ffmpeg.")
+            return 1
+    except:
+        print("[!] ffmpeg not found. Please install ffmpeg.")
+        return 1
+
+    # Check compatibility of input files
+    print("Checking video compatibility...")
+    compat = _check_video_compatibility(input_files)
+    if not compat["compatible"]:
+        print("[!] Video files are not compatible for merging:")
+        for issue in compat["issues"]:
+            print(f"    - {issue}")
+        print("\nVideos must have the same codec, resolution, and frame rate.")
+        return 1
+
+    print(
+        f"  ✓ All videos compatible ({compat['video_codec']}, {compat['resolution']}, {compat['fps']:.2f} fps)"
+    )
+    print()
+
+    # Extract 360° metadata from first file
+    print("Extracting 360° metadata...")
+    metadata = _extract_360_metadata(input_files[0])
+    if metadata:
+        print(
+            f"  ✓ Found 360° metadata: {metadata.get('projection', 'unknown')} projection"
+        )
+    else:
+        print("  ⚠ No 360° metadata found in first file")
+    print()
+
+    # Perform the merge
+    print("Merging videos (lossless, no re-encoding)...")
+    print("  This may take a while depending on file sizes.")
+    print()
+
+    success = _merge_videos_ffmpeg(input_files, args.output, metadata)
+
+    if success:
+        output_size = Path(args.output).stat().st_size
+        print()
+        print("=" * 60)
+        print("✓ Merge complete!")
+        print(f"  Output: {args.output}")
+        print(f"  Size: {format_size_bytes(output_size)}")
+        if metadata:
+            print("  360° metadata: Preserved")
+        print("=" * 60)
+        return 0
+    else:
+        print()
+        print("[!] Merge failed!")
+        return 1
+
+
+def _detect_recording_sessions(files, gap_tolerance=3.0):
+    """
+    Auto-detect which files are parts of a single recording session.
+
+    Detection criteria:
+    1. Sequential file naming (e.g., DSCN0016.MP4, DSCN0017.MP4)
+    2. Similar creation timestamps (within gap_tolerance seconds)
+    3. Matching video parameters (codec, resolution, frame rate)
+
+    Returns: List of files that belong to the same session
+    """
+    print("Analyzing files for recording session detection...")
+
+    # Get metadata for all files
+    file_info = []
+    for f in files:
+        info = _get_video_info(f)
+        if info:
+            file_info.append((f, info))
+
+    if len(file_info) < 2:
+        return files
+
+    # Sort by filename (which usually correlates with recording order)
+    file_info.sort(key=lambda x: x[0])
+
+    # Group files by session
+    sessions = []
+    current_session = [file_info[0]]
+
+    for i in range(1, len(file_info)):
+        prev_file, prev_info = current_session[-1]
+        curr_file, curr_info = file_info[i]
+
+        is_continuous = True
+        issues = []
+
+        # Check 1: Sequential naming
+        prev_name = Path(prev_file).stem
+        curr_name = Path(curr_file).stem
+
+        # Try to extract numbers from filenames
+        prev_nums = "".join(c if c.isdigit() else " " for c in prev_name).split()
+        curr_nums = "".join(c if c.isdigit() else " " for c in curr_name).split()
+
+        if prev_nums and curr_nums:
+            try:
+                prev_num = int(prev_nums[-1])
+                curr_num = int(curr_nums[-1])
+                if curr_num != prev_num + 1:
+                    is_continuous = False
+                    issues.append(
+                        f"non-sequential numbering ({prev_num} -> {curr_num})"
+                    )
+            except ValueError:
+                pass
+
+        # Check 2: Timestamp gap
+        if prev_info.get("duration") and curr_info.get("creation_time"):
+            prev_end = prev_info.get("creation_time_ts", 0) + prev_info.get(
+                "duration", 0
+            )
+            curr_start = curr_info.get("creation_time_ts", 0)
+            gap = curr_start - prev_end
+
+            if gap > gap_tolerance:
+                is_continuous = False
+                issues.append(f"time gap too large ({gap:.1f}s > {gap_tolerance}s)")
+
+        # Check 3: Video parameters match
+        if prev_info.get("video_codec") != curr_info.get("video_codec"):
+            is_continuous = False
+            issues.append("different video codec")
+
+        if prev_info.get("width") != curr_info.get("width") or prev_info.get(
+            "height"
+        ) != curr_info.get("height"):
+            is_continuous = False
+            issues.append("different resolution")
+
+        if prev_info.get("fps") and curr_info.get("fps"):
+            fps_diff = abs(prev_info["fps"] - curr_info["fps"])
+            if fps_diff > 0.1:  # Allow small floating point differences
+                is_continuous = False
+                issues.append("different frame rate")
+
+        if is_continuous:
+            current_session.append((curr_file, curr_info))
+        else:
+            sessions.append(current_session)
+            current_session = [(curr_file, curr_info)]
+
+            print(f"  Break after {Path(prev_file).name} -> {Path(curr_file).name}:")
+            for issue in issues:
+                print(f"    - {issue}")
+
+    sessions.append(current_session)
+
+    print()
+    print(f"Detected {len(sessions)} recording session(s):")
+    for i, session in enumerate(sessions, 1):
+        print(f"  Session {i}: {len(session)} file(s)")
+        for f, _ in session[:3]:
+            print(f"    - {Path(f).name}")
+        if len(session) > 3:
+            print(f"    ... and {len(session) - 3} more")
+    print()
+
+    # Return the largest session
+    if sessions:
+        largest = max(sessions, key=len)
+        if len(largest) > 1:
+            return [f for f, _ in largest]
+
+    return files
+
+
+def _get_video_info(filepath):
+    """Get video metadata using ffprobe"""
+    try:
+        cmd = [
+            "ffprobe",
+            "-v",
+            "quiet",
+            "-print_format",
+            "json",
+            "-show_streams",
+            "-show_format",
+            filepath,
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+
+        if result.returncode != 0:
+            return None
+
+        data = json.loads(result.stdout)
+        info = {
+            "filepath": filepath,
+            "duration": 0,
+            "creation_time": None,
+            "creation_time_ts": 0,
+            "video_codec": None,
+            "audio_codec": None,
+            "width": 0,
+            "height": 0,
+            "fps": 0,
+        }
+
+        # Get format info
+        format_info = data.get("format", {})
+        info["duration"] = float(format_info.get("duration", 0))
+
+        # Get stream info
+        for stream in data.get("streams", []):
+            if stream.get("codec_type") == "video":
+                info["video_codec"] = stream.get("codec_name")
+                info["width"] = stream.get("width")
+                info["height"] = stream.get("height")
+
+                # Calculate FPS
+                fps_str = stream.get("r_frame_rate", "0/1")
+                if "/" in fps_str:
+                    num, den = fps_str.split("/")
+                    info["fps"] = float(num) / float(den) if float(den) != 0 else 0
+                else:
+                    info["fps"] = float(fps_str)
+
+                # Get creation time from tags
+                tags = stream.get("tags", {})
+                creation = tags.get("creation_time")
+                if creation:
+                    info["creation_time"] = creation
+                    try:
+                        # Parse ISO timestamp
+                        from datetime import datetime
+
+                        dt = datetime.fromisoformat(creation.replace("Z", "+00:00"))
+                        info["creation_time_ts"] = dt.timestamp()
+                    except:
+                        pass
+
+            elif stream.get("codec_type") == "audio":
+                info["audio_codec"] = stream.get("codec_name")
+
+        return info
+    except Exception:
+        return None
+
+
+def _check_video_compatibility(files):
+    """Check if video files are compatible for concatenation"""
+    if not files:
+        return {"compatible": False, "issues": ["no files"]}
+
+    issues = []
+    base_info = _get_video_info(files[0])
+
+    if not base_info:
+        return {"compatible": False, "issues": ["could not read first file"]}
+
+    result = {
+        "compatible": True,
+        "video_codec": base_info.get("video_codec"),
+        "audio_codec": base_info.get("audio_codec"),
+        "resolution": f"{base_info.get('width')}x{base_info.get('height')}",
+        "fps": base_info.get("fps"),
+        "issues": [],
+    }
+
+    for f in files[1:]:
+        info = _get_video_info(f)
+        if not info:
+            issues.append(f"{Path(f).name}: could not read file")
+            continue
+
+        if info.get("video_codec") != base_info.get("video_codec"):
+            issues.append(
+                f"{Path(f).name}: video codec mismatch ({info.get('video_codec')} vs {base_info.get('video_codec')})"
+            )
+
+        if info.get("width") != base_info.get("width") or info.get(
+            "height"
+        ) != base_info.get("height"):
+            issues.append(
+                f"{Path(f).name}: resolution mismatch ({info.get('width')}x{info.get('height')} vs {base_info.get('width')}x{base_info.get('height')})"
+            )
+
+        if info.get("fps") and base_info.get("fps"):
+            fps_diff = abs(info["fps"] - base_info["fps"])
+            if fps_diff > 0.1:
+                issues.append(
+                    f"{Path(f).name}: frame rate mismatch ({info['fps']:.2f} vs {base_info['fps']:.2f})"
+                )
+
+    if issues:
+        result["compatible"] = False
+        result["issues"] = issues
+
+    return result
+
+
+def _extract_360_metadata(filepath):
+    """Extract 360° spherical metadata from video file"""
+    try:
+        cmd = [
+            "ffprobe",
+            "-v",
+            "quiet",
+            "-print_format",
+            "json",
+            "-show_streams",
+            filepath,
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+
+        if result.returncode != 0:
+            return None
+
+        data = json.loads(result.stdout)
+
+        for stream in data.get("streams", []):
+            if stream.get("codec_type") == "video":
+                # Check side_data_list for spherical mapping
+                side_data = stream.get("side_data_list", [])
+                for sd in side_data:
+                    if "spherical" in sd.get("side_data_type", "").lower():
+                        return {
+                            "projection": sd.get("projection", "equirectangular"),
+                            "yaw": sd.get("yaw", 0),
+                            "pitch": sd.get("pitch", 0),
+                            "roll": sd.get("roll", 0),
+                        }
+
+                # Check tags
+                tags = stream.get("tags", {})
+                if tags.get("spherical") or tags.get("projection_type"):
+                    return {
+                        "projection": tags.get("projection_type", "equirectangular"),
+                        "spherical": tags.get("spherical"),
+                        "stereo_mode": tags.get("stereo_mode", "mono"),
+                    }
+
+        return None
+    except Exception:
+        return None
+
+
+def _merge_videos_ffmpeg(input_files, output_file, metadata=None):
+    """
+    Merge videos using ffmpeg concat demuxer (lossless, no re-encoding).
+
+    Args:
+        input_files: List of input video file paths
+        output_file: Path for output merged video
+        metadata: Dict with 360° metadata to inject (optional)
+
+    Returns:
+        True if successful, False otherwise
+    """
+    import tempfile
+
+    # Create concat list file
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+        concat_file = f.name
+        for input_file in input_files:
+            # Get absolute path and escape single quotes
+            abs_path = os.path.abspath(input_file)
+            escaped = abs_path.replace("'", "'\\''")
+            f.write(f"file '{escaped}'\n")
+
+    try:
+        # Build ffmpeg command
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            concat_file,
+            "-c",
+            "copy",
+            "-movflags",
+            "+faststart",
+        ]
+
+        # Add metadata if available
+        if metadata:
+            projection = metadata.get("projection", "equirectangular")
+            cmd.extend(
+                [
+                    "-metadata:s:v:0",
+                    "spherical=1",
+                    "-metadata:s:v:0",
+                    f"projection_type={projection}",
+                    "-metadata:s:v:0",
+                    "stereo_mode=mono",
+                ]
+            )
+
+            # Add initial view if available
+            if "yaw" in metadata:
+                cmd.extend(
+                    ["-metadata:s:v:0", f"initial_view_heading={metadata['yaw']}"]
+                )
+            if "pitch" in metadata:
+                cmd.extend(
+                    ["-metadata:s:v:0", f"initial_view_pitch={metadata['pitch']}"]
+                )
+            if "roll" in metadata:
+                cmd.extend(["-metadata:s:v:0", f"initial_view_roll={metadata['roll']}"])
+
+        cmd.append(output_file)
+
+        # Run ffmpeg
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
+
+        if result.returncode != 0:
+            print(f"[!] ffmpeg error: {result.stderr[-500:]}")  # Last 500 chars
+            return False
+
+        # Verify output file was created
+        if not Path(output_file).exists():
+            print("[!] Output file was not created")
+            return False
+
+        # If we had 360 metadata, verify or re-inject with exiftool if available
+        if metadata:
+            _reinject_360_metadata(output_file, metadata)
+
+        return True
+
+    finally:
+        # Clean up concat file
+        try:
+            os.unlink(concat_file)
+        except:
+            pass
+
+
+def _reinject_360_metadata(output_file, metadata):
+    """
+    Re-inject 360° metadata using exiftool if available.
+    This ensures YouTube properly recognizes the merged video.
+    """
+    # Check for exiftool
+    exiftool_path = None
+    for path in ["exiftool", "/usr/bin/exiftool", "/usr/local/bin/exiftool"]:
+        try:
+            result = subprocess.run([path, "-ver"], capture_output=True, timeout=5)
+            if result.returncode == 0:
+                exiftool_path = path
+                break
+        except:
+            continue
+
+    if not exiftool_path:
+        print("  Note: exiftool not found. Metadata preserved via ffmpeg.")
+        print(
+            "  For best YouTube compatibility, install: sudo pacman -S perl-image-exiftool"
+        )
+        return
+
+    try:
+        cmd = [
+            exiftool_path,
+            "-XMP-GSpherical:Spherical=true",
+            "-XMP-GSpherical:Stitched=true",
+            "-XMP-GSpherical:StitchingSoftware=KeyMission360Tools",
+            "-XMP-GSpherical:ProjectionType=equirectangular",
+            "-XMP-GSpherical:StereoMode=mono",
+            "-overwrite_original",
+            output_file,
+        ]
+
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+
+        if result.returncode == 0:
+            print("  ✓ 360° metadata re-injected with exiftool")
+        else:
+            print(f"  Note: exiftool metadata injection returned: {result.stderr}")
+
+    except Exception as e:
+        print(f"  Note: Could not re-inject metadata with exiftool: {e}")
+
+
+# =============================================================================
 # WIFI Command
 # =============================================================================
+
 
 def cmd_wifi(args):
     """Configure WiFi settings"""
@@ -1431,49 +2952,55 @@ def cmd_wifi(args):
     print("Nikon KeyMission 360 WiFi Configuration")
     print("=" * 60)
     print()
-    
+
     if not check_gphoto2():
         print("[!] gphoto2 not installed!")
         return 1
-    
+
     if not detect_camera():
         print("[!] Camera not found!")
         return 1
-    
+
     # Read current settings
     try:
         result = subprocess.run(
             ["gphoto2", "--get-config", "/main/other/d338"],
-            capture_output=True, text=True, timeout=10
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         current_name = ""
-        for line in result.stdout.split('\n'):
-            if 'Current:' in line:
-                current_name = line.split(':', 1)[1].strip()
+        for line in result.stdout.split("\n"):
+            if "Current:" in line:
+                current_name = line.split(":", 1)[1].strip()
                 break
-        
+
         result = subprocess.run(
             ["gphoto2", "--get-config", "/main/other/d340"],
-            capture_output=True, text=True, timeout=10
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         current_pass = ""
-        for line in result.stdout.split('\n'):
-            if 'Current:' in line:
-                current_pass = line.split(':', 1)[1].strip()
+        for line in result.stdout.split("\n"):
+            if "Current:" in line:
+                current_pass = line.split(":", 1)[1].strip()
                 break
-        
+
         print(f"Current WiFi Name (SSID): {current_name}")
         print(f"Current WiFi Password: {current_pass}")
         print()
     except:
         pass
-    
+
     if args.ssid:
         print(f"Setting WiFi Name to: {args.ssid}")
         try:
             result = subprocess.run(
                 ["gphoto2", "--set-config", f"/main/other/d338={args.ssid}"],
-                capture_output=True, text=True, timeout=10
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
             if result.returncode == 0:
                 print("[✓] WiFi Name set successfully")
@@ -1483,13 +3010,15 @@ def cmd_wifi(args):
         except Exception as e:
             print(f"[!] Error: {e}")
             return 1
-    
+
     if args.password:
         print(f"Setting WiFi Password to: {'*' * len(args.password)}")
         try:
             result = subprocess.run(
                 ["gphoto2", "--set-config", f"/main/other/d340={args.password}"],
-                capture_output=True, text=True, timeout=10
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
             if result.returncode == 0:
                 print("[✓] WiFi Password set successfully")
@@ -1499,13 +3028,15 @@ def cmd_wifi(args):
         except Exception as e:
             print(f"[!] Error: {e}")
             return 1
-    
+
     if args.channel:
         print(f"Setting WiFi Channel to: {args.channel}")
         try:
             result = subprocess.run(
                 ["gphoto2", "--set-config", f"/main/other/d341={args.channel}"],
-                capture_output=True, text=True, timeout=10
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
             if result.returncode == 0:
                 print("[✓] WiFi Channel set successfully")
@@ -1515,7 +3046,7 @@ def cmd_wifi(args):
         except Exception as e:
             print(f"[!] Error: {e}")
             return 1
-    
+
     if not any([args.ssid, args.password, args.channel]):
         print("Use --ssid, --password, or --channel to change settings")
         print()
@@ -1523,7 +3054,7 @@ def cmd_wifi(args):
         print("  km360 wifi --ssid MyCamera360")
         print("  km360 wifi --password MyNewPass123")
         print("  km360 wifi --ssid MyCamera --password MyPass --channel 6")
-    
+
     return 0
 
 
@@ -1531,26 +3062,27 @@ def cmd_wifi(args):
 # SETTINGS Command
 # =============================================================================
 
+
 def cmd_settings(args):
     """Camera settings"""
     print("=" * 60)
     print("Nikon KeyMission 360 Camera Settings")
     print("=" * 60)
     print()
-    
+
     if not check_gphoto2():
         print("[!] gphoto2 not installed!")
         return 1
-    
+
     if not detect_camera():
         print("[!] Camera not found!")
         return 1
-    
+
     # Show current settings
     if args.show or not any([args.whitebalance, args.copyright, args.target]):
         print("Current Settings:")
         print("-" * 60)
-        
+
         settings = [
             ("datetime", "Date/Time"),
             ("whitebalance", "White Balance"),
@@ -1558,63 +3090,68 @@ def cmd_settings(args):
             ("/main/other/501f", "Copyright"),
             ("/main/other/d338", "WiFi Name (SSID)"),
         ]
-        
+
         for config, name in settings:
             try:
                 result = subprocess.run(
                     ["gphoto2", "--get-config", config],
-                    capture_output=True, text=True, timeout=10
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
                 )
                 current = ""
-                for line in result.stdout.split('\n'):
-                    if 'Current:' in line:
-                        current = line.split(':', 1)[1].strip()
+                for line in result.stdout.split("\n"):
+                    if "Current:" in line:
+                        current = line.split(":", 1)[1].strip()
                         break
                 print(f"  {name}: {current}")
             except:
                 pass
-        
+
         print()
-    
+
     # Apply settings
     if args.whitebalance is not None:
-        wb_map = {'auto': 0, 'daylight': 1, 'fluorescent': 2, 'tungsten': 3}
+        wb_map = {"auto": 0, "daylight": 1, "fluorescent": 2, "tungsten": 3}
         wb_value = wb_map.get(args.whitebalance.lower(), 0)
         print(f"Setting White Balance to: {args.whitebalance}")
         try:
             subprocess.run(
                 ["gphoto2", "--set-config", f"whitebalance={wb_value}"],
-                capture_output=True, timeout=10
+                capture_output=True,
+                timeout=10,
             )
             print("[✓] White Balance set")
         except Exception as e:
             print(f"[!] Failed: {e}")
-    
+
     if args.copyright:
         print(f"Setting Copyright to: {args.copyright}")
         try:
             subprocess.run(
                 ["gphoto2", "--set-config", f"/main/other/501f={args.copyright}"],
-                capture_output=True, timeout=10
+                capture_output=True,
+                timeout=10,
             )
             print("[✓] Copyright set")
         except Exception as e:
             print(f"[!] Failed: {e}")
-    
+
     if args.target is not None:
-        target_map = {'ram': 0, 'card': 1, 'sd': 1}
+        target_map = {"ram": 0, "card": 1, "sd": 1}
         target_value = target_map.get(args.target.lower(), 1)
         target_name = "Internal RAM" if target_value == 0 else "Memory Card"
         print(f"Setting Capture Target to: {target_name}")
         try:
             subprocess.run(
                 ["gphoto2", "--set-config", f"capturetarget={target_value}"],
-                capture_output=True, timeout=10
+                capture_output=True,
+                timeout=10,
             )
             print("[✓] Capture Target set")
         except Exception as e:
             print(f"[!] Failed: {e}")
-    
+
     return 0
 
 
@@ -1622,52 +3159,146 @@ def cmd_settings(args):
 # INSTALL Command
 # =============================================================================
 
+
 def cmd_install(args):
-    """Install desktop entry"""
+    """Install desktop entry and/or udev rules"""
     print("=" * 60)
-    print("KeyMission 360 Desktop Entry Installer")
+    print("KeyMission 360 Installer")
     print("=" * 60)
     print()
-    
+
+    # Handle udev rules installation
+    if args.udev:
+        return _install_udev_rules(args.remove)
+
+    # Handle desktop entry
+    if args.remove:
+        return _remove_desktop_entry()
+
+    return _install_desktop_entry()
+
+
+def _install_udev_rules(remove=False):
+    """Install udev rules for USB access"""
+    udev_dir = Path("/etc/udev/rules.d")
+    udev_file = udev_dir / "99-keymission360.rules"
+
+    if remove:
+        if udev_file.exists():
+            try:
+                subprocess.run(["sudo", "rm", str(udev_file)], check=True)
+                subprocess.run(["sudo", "udevadm", "control", "--reload-rules"])
+                print("✓ udev rules removed")
+            except Exception as e:
+                print(f"✗ Failed to remove udev rules: {e}")
+                return 1
+        else:
+            print("udev rules not installed")
+        return 0
+
+    # Check if already installed
+    if udev_file.exists():
+        print("✓ udev rules already installed")
+        return 0
+
+    print("Installing udev rules for USB access...")
+    print("  This allows non-root USB access to the camera")
+    print()
+
+    udev_content = """# Nikon KeyMission 360 USB rules
+# Allows non-root access to camera
+SUBSYSTEM=="usb", ATTR{idVendor}=="04b0", ATTR{idProduct}=="019f", MODE="0666", GROUP="plugdev"
+"""
+
+    # Write to temp file first
+    temp_file = tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".rules")
+    temp_file.write(udev_content)
+    temp_file.close()
+
+    try:
+        # Use sudo to copy to system directory
+        print(f"  Copying rules to {udev_file}...")
+        result = subprocess.run(
+            ["sudo", "cp", temp_file.name, str(udev_file)],
+            capture_output=True,
+            text=True,
+        )
+
+        if result.returncode != 0:
+            print(f"✗ Failed to install udev rules: {result.stderr}")
+            print("  Try running: sudo km360 install --udev")
+            os.unlink(temp_file.name)
+            return 1
+
+        # Set permissions
+        subprocess.run(["sudo", "chmod", "644", str(udev_file)], check=True)
+
+        # Reload rules
+        print("  Reloading udev rules...")
+        subprocess.run(["sudo", "udevadm", "control", "--reload-rules"])
+        subprocess.run(["sudo", "udevadm", "trigger"])
+
+        os.unlink(temp_file.name)
+
+        print("\n✓ udev rules installed successfully!")
+        print()
+        print("To apply rules to your user:")
+        print("  1. Add yourself to plugdev group:")
+        print("     sudo usermod -a -G plugdev $USER")
+        print("  2. Log out and back in (or reboot)")
+        print()
+        print("After that, USB reset and camera access will work without sudo.")
+
+    except Exception as e:
+        print(f"✗ Error installing udev rules: {e}")
+        os.unlink(temp_file.name)
+        return 1
+
+    return 0
+
+
+def _install_desktop_entry():
+    """Install desktop entry"""
     # Get directories
-    xdg_data_home = os.environ.get('XDG_DATA_HOME', Path.home() / '.local' / 'share')
-    user_apps_dir = Path(xdg_data_home) / 'applications'
-    user_icons_dir = Path(xdg_data_home) / 'icons' / 'hicolor' / '256x256' / 'apps'
-    
+    xdg_data_home = os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")
+    user_apps_dir = Path(xdg_data_home) / "applications"
+    user_icons_dir = Path(xdg_data_home) / "icons" / "hicolor" / "256x256" / "apps"
+
     script_dir = Path(__file__).parent.absolute()
-    
+
     # Create icon
     print("Creating application icon...")
     user_icons_dir.mkdir(parents=True, exist_ok=True)
-    icon_path = user_icons_dir / 'km360-utility.png'
-    
+    icon_path = user_icons_dir / "km360-utility.png"
+
     try:
         from PIL import Image, ImageDraw
-        img = Image.new('RGBA', (256, 256), (0, 0, 0, 0))
+
+        img = Image.new("RGBA", (256, 256), (0, 0, 0, 0))
         draw = ImageDraw.Draw(img)
-        draw.ellipse([20, 40, 236, 216], fill='#1a1a2e', outline='#16213e', width=4)
-        draw.ellipse([60, 80, 196, 176], fill='#0f3460', outline='#e94560', width=3)
-        draw.ellipse([100, 110, 156, 146], fill='#e94560')
-        draw.rectangle([100, 25, 156, 45], fill='#16213e', outline='#0f3460', width=2)
+        draw.ellipse([20, 40, 236, 216], fill="#1a1a2e", outline="#16213e", width=4)
+        draw.ellipse([60, 80, 196, 176], fill="#0f3460", outline="#e94560", width=3)
+        draw.ellipse([100, 110, 156, 146], fill="#e94560")
+        draw.rectangle([100, 25, 156, 45], fill="#16213e", outline="#0f3460", width=2)
         img.save(icon_path)
         print(f"  ✓ Icon created: {icon_path}")
-        icon_name = 'km360-utility'
+        icon_name = "km360-utility"
     except:
         print("  ⚠ Using system default icon")
-        icon_name = 'camera-video'
-    
+        icon_name = "camera-video"
+
     # Create desktop entry
     print("\nCreating desktop entry...")
     user_apps_dir.mkdir(parents=True, exist_ok=True)
-    desktop_path = user_apps_dir / 'km360-utility.desktop'
-    
+    desktop_path = user_apps_dir / "km360-utility.desktop"
+
     # Use this script as the GUI launcher if km360_gui.py doesn't exist
-    gui_script = script_dir / 'km360_gui.py'
+    gui_script = script_dir / "km360_gui.py"
     if gui_script.exists():
         exec_line = f'python3 "{gui_script}"'
     else:
         exec_line = f'python3 "{Path(__file__)}" gui'
-    
+
     desktop_content = f"""[Desktop Entry]
 Name=KeyMission 360 Utility
 Comment=Nikon KeyMission 360/170 Camera Manager for Linux
@@ -1680,7 +3311,7 @@ Keywords=Camera;Nikon;360;Video;Photo;KeyMission;
 StartupNotify=true
 MimeType=image/jpeg;image/png;video/mp4;video/quicktime;
 """
-    
+
     try:
         desktop_path.write_text(desktop_content)
         desktop_path.chmod(0o755)
@@ -1688,7 +3319,7 @@ MimeType=image/jpeg;image/png;video/mp4;video/quicktime;
     except Exception as e:
         print(f"  ✗ Failed to create desktop entry: {e}")
         return 1
-    
+
     print()
     print("=" * 60)
     print("Installation successful!")
@@ -1697,17 +3328,42 @@ MimeType=image/jpeg;image/png;video/mp4;video/quicktime;
     print("  • Application menu (search for 'KeyMission')")
     print("  • Activities overview (GNOME)")
     print("  • Alt+F2 run dialog")
-    
-    if args.remove:
-        # Remove mode
-        if desktop_path.exists():
-            desktop_path.unlink()
-            print(f"\nRemoved: {desktop_path}")
-        if icon_path.exists():
-            icon_path.unlink()
-            print(f"Removed: {icon_path}")
+
+    # Check if udev rules are installed
+    udev_path = Path("/etc/udev/rules.d/99-keymission360.rules")
+    if not udev_path.exists():
+        print()
+        print("Tip: For best USB experience, install udev rules:")
+        print("  km360 install --udev")
+
+    return 0
+
+
+def _remove_desktop_entry():
+    """Remove desktop entry"""
+    xdg_data_home = os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")
+    user_apps_dir = Path(xdg_data_home) / "applications"
+    user_icons_dir = Path(xdg_data_home) / "icons" / "hicolor" / "256x256" / "apps"
+
+    desktop_path = user_apps_dir / "km360-utility.desktop"
+    icon_path = user_icons_dir / "km360-utility.png"
+
+    removed = False
+    if desktop_path.exists():
+        desktop_path.unlink()
+        print(f"Removed: {desktop_path}")
+        removed = True
+
+    if icon_path.exists():
+        icon_path.unlink()
+        print(f"Removed: {icon_path}")
+        removed = True
+
+    if removed:
         print("\nDesktop entry removed.")
-    
+    else:
+        print("Desktop entry not found.")
+
     return 0
 
 
@@ -1715,16 +3371,17 @@ MimeType=image/jpeg;image/png;video/mp4;video/quicktime;
 # GUI Command (fallback if km360_gui.py doesn't exist)
 # =============================================================================
 
+
 def cmd_gui(args):
     """Launch GUI (placeholder - recommends installing full package)"""
     print("=" * 60)
     print("KeyMission 360 GUI")
     print("=" * 60)
     print()
-    
+
     script_dir = Path(__file__).parent.absolute()
-    gui_script = script_dir / 'km360_gui.py'
-    
+    gui_script = script_dir / "km360_gui.py"
+
     if gui_script.exists():
         # Launch the full GUI
         subprocess.run([sys.executable, str(gui_script)])
@@ -1752,9 +3409,10 @@ def cmd_gui(args):
 # Main Entry Point
 # =============================================================================
 
+
 def main():
     parser = argparse.ArgumentParser(
-        prog='km360',
+        prog="km360",
         description=f"""
 KeyMission 360 - Comprehensive CLI Tool v{VERSION}
 
@@ -1764,20 +3422,26 @@ Provides camera control, file management, 360° viewing, and YouTube export.
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
+  km360 check                     # Check dependencies and USB reset
+  km360 deps --install            # Install missing dependencies
   km360 info                      # Show camera information
   km360 format                    # Format SD card (with confirmation)
   km360 format --force            # Format without confirmation
   km360 time                      # Sync camera time to system time
   km360 time --check              # Check current camera time
   km360 list                      # List all files on camera
-  km360 download --all ~/Photos   # Download all files
+  km360 download --all ~/Photos   # Download all files (skip existing)
+  km360 download --all --force ~/Photos  # Re-download all
   km360 download 5 ~/video.mp4    # Download file #5
-  km360 reset                     # Reset USB port
+  km360 reset                     # Reset USB port (auto-fixes dependencies)
   km360 viewer photo.jpg          # View 360° image
   km360 youtube video.mp4         # Add YouTube 360° metadata
+  km360 merge -o out.mp4 *.MP4    # Merge videos preserving 360° metadata
+  km360 merge --auto -o out.mp4 DSCN*.MP4  # Auto-detect split recordings
   km360 wifi --ssid MyCamera      # Change WiFi name
   km360 settings --show           # Show all settings
   km360 install                   # Add to application menu
+  km360 install --udev            # Install USB rules for non-root access
 
 For detailed help on a command:
   km360 <command> --help
@@ -1790,96 +3454,244 @@ Requirements:
   - ffmpeg: sudo apt-get install ffmpeg (for YouTube export)
 
 License: MIT
-        """
+        """,
     )
-    
-    parser.add_argument('--version', '-v', action='version', version=f'%(prog)s {VERSION}')
-    
-    subparsers = parser.add_subparsers(dest='command', help='Available commands')
-    
+
+    parser.add_argument(
+        "--version", "-v", action="version", version=f"%(prog)s {VERSION}"
+    )
+
+    subparsers = parser.add_subparsers(dest="command", help="Available commands")
+
     # Info command
-    p_info = subparsers.add_parser('info', help='Show camera information')
+    p_info = subparsers.add_parser("info", help="Show camera information")
     p_info.set_defaults(func=cmd_info)
-    
+
     # Format command
-    p_format = subparsers.add_parser('format', help='Format SD card via PTP')
-    p_format.add_argument('--storage', '-s', type=lambda x: int(x, 0),
-                         help='Specific storage ID (hex, e.g., 0x00010001)')
-    p_format.add_argument('--force', '-f', action='store_true',
-                         help='Skip confirmation (DANGEROUS)')
-    p_format.add_argument('--list', '-l', action='store_true',
-                         help='List storage devices only')
+    p_format = subparsers.add_parser("format", help="Format SD card via PTP")
+    p_format.add_argument(
+        "--storage",
+        "-s",
+        type=lambda x: int(x, 0),
+        help="Specific storage ID (hex, e.g., 0x00010001)",
+    )
+    p_format.add_argument(
+        "--force", "-f", action="store_true", help="Skip confirmation (DANGEROUS)"
+    )
+    p_format.add_argument(
+        "--list", "-l", action="store_true", help="List storage devices only"
+    )
     p_format.set_defaults(func=cmd_format)
-    
+
     # Time command
-    p_time = subparsers.add_parser('time', help='Sync camera time')
-    p_time.add_argument('--check', '-c', action='store_true',
-                       help='Only check current time, don\'t change')
+    p_time = subparsers.add_parser("time", help="Sync camera time")
+    p_time.add_argument(
+        "--check",
+        "-c",
+        action="store_true",
+        help="Only check current time, don't change",
+    )
     p_time.set_defaults(func=cmd_time)
-    
+
     # List command
-    p_list = subparsers.add_parser('list', help='List files on camera')
+    p_list = subparsers.add_parser("list", help="List files on camera")
     p_list.set_defaults(func=cmd_list)
-    
+
     # Download command
-    p_download = subparsers.add_parser('download', help='Download files from camera')
-    p_download.add_argument('file_num', nargs='?', type=int, help='File number to download')
-    p_download.add_argument('--output', '-o', help='Output directory or file')
-    p_download.add_argument('--all', '-a', action='store_true', help='Download all files')
-    p_download.add_argument('--retries', '-r', type=int, default=3, help='Max retry attempts')
-    p_download.add_argument('--no-verify', action='store_true', help='Skip checksum verification')
-    p_download.add_argument('--no-metadata', action='store_true', help='Skip YouTube metadata injection')
+    p_download = subparsers.add_parser("download", help="Download files from camera")
+    p_download.add_argument(
+        "file_num", nargs="?", type=int, help="File number to download"
+    )
+    p_download.add_argument("--output", "-o", help="Output directory or file")
+    p_download.add_argument(
+        "--all", "-a", action="store_true", help="Download all files"
+    )
+    p_download.add_argument(
+        "--retries", "-r", type=int, default=3, help="Max retry attempts"
+    )
+    p_download.add_argument(
+        "--no-verify", action="store_true", help="Skip checksum verification"
+    )
+    p_download.add_argument(
+        "--no-metadata", action="store_true", help="Skip YouTube metadata injection"
+    )
+    p_download.add_argument(
+        "--force", "-f", action="store_true", help="Re-download even if file exists"
+    )
+    p_download.add_argument(
+        "--no-skip",
+        action="store_true",
+        help="Do not skip existing files (same as --force)",
+    )
+    p_download.add_argument(
+        "--no-merge-check", action="store_true", help="Skip merge candidate detection"
+    )
     p_download.set_defaults(func=cmd_download)
-    
+
+    # Delete command
+    p_delete = subparsers.add_parser("delete", help="Delete files from camera")
+    p_delete.add_argument("file_num", nargs="?", type=int, help="File number to delete")
+    p_delete.add_argument("--all", "-a", action="store_true", help="Delete all files")
+    p_delete.add_argument(
+        "--force", "-f", action="store_true", help="Skip confirmation"
+    )
+    p_delete.set_defaults(func=cmd_delete)
+
     # Reset command
-    p_reset = subparsers.add_parser('reset', help='Reset USB port')
-    p_reset.add_argument('--force', '-f', action='store_true', help='Skip confirmation')
+    p_reset = subparsers.add_parser("reset", help="Reset USB port")
+    p_reset.add_argument("--force", "-f", action="store_true", help="Skip confirmation")
+    p_reset.add_argument(
+        "--auto-install",
+        "-a",
+        action="store_true",
+        help="Auto-install missing dependencies",
+    )
     p_reset.set_defaults(func=cmd_reset)
-    
+
     # Viewer command
-    p_viewer = subparsers.add_parser('viewer', help='Launch 360° viewer')
-    p_viewer.add_argument('file', nargs='?', help='Image or video file to open')
+    p_viewer = subparsers.add_parser("viewer", help="Launch 360° viewer")
+    p_viewer.add_argument("file", nargs="?", help="Image or video file to open")
     p_viewer.set_defaults(func=cmd_viewer)
-    
+
     # YouTube command
-    p_youtube = subparsers.add_parser('youtube', help='Inject 360° metadata for YouTube')
-    p_youtube.add_argument('input', nargs='?', help='Input video file or directory')
-    p_youtube.add_argument('--output', '-o', help='Output file (optional)')
-    p_youtube.add_argument('--batch', '-b', action='store_true', help='Batch process directory')
-    p_youtube.add_argument('--in-place', '-i', action='store_true', help='Modify files in-place')
+    p_youtube = subparsers.add_parser(
+        "youtube", help="Inject 360° metadata for YouTube"
+    )
+    p_youtube.add_argument("input", nargs="?", help="Input video file or directory")
+    p_youtube.add_argument("--output", "-o", help="Output file (optional)")
+    p_youtube.add_argument(
+        "--batch", "-b", action="store_true", help="Batch process directory"
+    )
+    p_youtube.add_argument(
+        "--in-place", "-i", action="store_true", help="Modify files in-place"
+    )
     p_youtube.set_defaults(func=cmd_youtube)
-    
+
     # WiFi command
-    p_wifi = subparsers.add_parser('wifi', help='Configure WiFi settings')
-    p_wifi.add_argument('--ssid', help='WiFi network name (SSID)')
-    p_wifi.add_argument('--password', help='WiFi password')
-    p_wifi.add_argument('--channel', type=int, help='WiFi channel (1-11)')
+    p_wifi = subparsers.add_parser("wifi", help="Configure WiFi settings")
+    p_wifi.add_argument("--ssid", help="WiFi network name (SSID)")
+    p_wifi.add_argument("--password", help="WiFi password")
+    p_wifi.add_argument("--channel", type=int, help="WiFi channel (1-11)")
     p_wifi.set_defaults(func=cmd_wifi)
-    
+
     # Settings command
-    p_settings = subparsers.add_parser('settings', help='Camera settings')
-    p_settings.add_argument('--show', '-s', action='store_true', help='Show all settings')
-    p_settings.add_argument('--whitebalance', choices=['auto', 'daylight', 'fluorescent', 'tungsten'],
-                           help='Set white balance')
-    p_settings.add_argument('--copyright', help='Set copyright info')
-    p_settings.add_argument('--target', choices=['ram', 'card', 'sd'], help='Set capture target')
+    p_settings = subparsers.add_parser("settings", help="Camera settings")
+    p_settings.add_argument(
+        "--show", "-s", action="store_true", help="Show all settings"
+    )
+    p_settings.add_argument(
+        "--whitebalance",
+        choices=["auto", "daylight", "fluorescent", "tungsten"],
+        help="Set white balance",
+    )
+    p_settings.add_argument("--copyright", help="Set copyright info")
+    p_settings.add_argument(
+        "--target", choices=["ram", "card", "sd"], help="Set capture target"
+    )
     p_settings.set_defaults(func=cmd_settings)
-    
+
     # Install command
-    p_install = subparsers.add_parser('install', help='Install desktop entry')
-    p_install.add_argument('--remove', '-r', action='store_true', help='Remove desktop entry')
+    p_install = subparsers.add_parser(
+        "install", help="Install desktop entry and udev rules"
+    )
+    p_install.add_argument(
+        "--remove", "-r", action="store_true", help="Remove desktop entry"
+    )
+    p_install.add_argument(
+        "--udev", "-u", action="store_true", help="Install udev rules for USB access"
+    )
     p_install.set_defaults(func=cmd_install)
-    
+
+    # Deps command
+    p_deps = subparsers.add_parser("deps", help="Check and install dependencies")
+    p_deps.add_argument(
+        "--check", "-c", action="store_true", help="Check all dependencies"
+    )
+    p_deps.add_argument(
+        "--install", "-i", action="store_true", help="Interactive install"
+    )
+    p_deps.add_argument(
+        "--install-all", "-a", action="store_true", help="Auto-install all missing"
+    )
+    p_deps.add_argument(
+        "--for", dest="for_command", help="Check deps for specific command"
+    )
+    p_deps.add_argument(
+        "--usb-reset",
+        "-u",
+        action="store_true",
+        help="Also check USB reset capabilities",
+    )
+    p_deps.set_defaults(func=cmd_deps)
+
+    # Merge command
+    p_merge = subparsers.add_parser(
+        "merge", help="Losslessly merge video files while preserving 360° metadata"
+    )
+    p_merge.add_argument(
+        "inputs", nargs="+", help="Input video files to merge (in order)"
+    )
+    p_merge.add_argument(
+        "--output", "-o", required=True, help="Output merged video file"
+    )
+    p_merge.add_argument(
+        "--auto",
+        "-a",
+        action="store_true",
+        help="Force auto-detect split files by filename pattern",
+    )
+    p_merge.add_argument(
+        "--no-auto", action="store_true", help="Disable smart auto-detection"
+    )
+    p_merge.add_argument(
+        "--detect-only",
+        "-d",
+        action="store_true",
+        help="Only detect and show which files would be merged, do not merge",
+    )
+    p_merge.add_argument(
+        "--gap-tolerance",
+        "-g",
+        type=float,
+        default=3.0,
+        help="Max seconds gap between files to consider same session (default: 3)",
+    )
+    p_merge.add_argument(
+        "--force", "-f", action="store_true", help="Skip confirmation prompts"
+    )
+    p_merge.set_defaults(func=cmd_merge)
+
+    # Check command (alias for deps --check --usb-reset)
+    p_check = subparsers.add_parser("check", help="Check dependencies and system setup")
+    p_check.add_argument(
+        "--usb-reset",
+        "-u",
+        action="store_true",
+        default=True,
+        help="Check USB reset capabilities",
+    )
+    p_check.set_defaults(
+        func=lambda args: cmd_deps(
+            argparse.Namespace(
+                check=True,
+                usb_reset=args.usb_reset,
+                install=False,
+                install_all=False,
+                for_command=None,
+            )
+        )
+    )
+
     # GUI command
-    p_gui = subparsers.add_parser('gui', help='Launch GUI (if available)')
+    p_gui = subparsers.add_parser("gui", help="Launch GUI (if available)")
     p_gui.set_defaults(func=cmd_gui)
-    
+
     args = parser.parse_args()
-    
+
     if args.command is None:
         parser.print_help()
         return 0
-    
+
     try:
         return args.func(args)
     except KeyboardInterrupt:

@@ -1,5 +1,7 @@
 # KeyMission 360 Linux Utility - Technical Specification
 
+**Current application version:** 3.0
+
 ## Project Overview
 
 A comprehensive Linux replacement for the Nikon KeyMission 360/170 Utility Windows application. Built using Python, gphoto2, and tkinter.
@@ -225,12 +227,28 @@ KeyMissionUtility.View
 
 ### 5.1 Completed Tools
 
-#### km360 (v2.0) - NEW: Standalone CLI
+#### km360 (v2.2) - Smart Downloads & Dependencies
 - **Purpose**: Single-file CLI combining all toolkit functionality
 - **Location**: `km360` (executable, 66KB)
 - **Documentation**: `KM360_CLI.md`
 - **Features**:
-  - **12 Subcommands**: info, format, time, list, download, reset, viewer, youtube, wifi, settings, install, gui
+  - **14 Subcommands**: info, format, time, list, **download**, reset, viewer, youtube, **merge**, wifi, settings, **deps**, **check**, install, gui
+  - **Smart Downloads**: `km360 download --all`
+    - Automatically skips duplicate files (same size)
+    - Shows summary of existing vs new files
+    - Verifies existing files with checksums
+    - Detects incomplete downloads and re-downloads
+    - `--force` flag to re-download everything
+  - **Dependency Manager**: `km360 deps` and `km360 check`
+    - Auto-detects missing dependencies
+    - Interactive and automatic installation
+    - Package manager detection (apt, pacman, brew, pip)
+  - **Smart USB Reset**: `km360 reset`
+    - Auto-checks and installs missing dependencies
+    - Multiple reset methods with fallbacks
+  - **Video Merge**: `km360 merge`
+    - Losslessly concatenate videos preserving 360° metadata
+    - Smart auto-detection of split recording sessions
   - **Self-contained**: Embeds implementations of all tools
   - **Fallback Support**: Uses gphoto2 when libusb1 unavailable
   - **Progress Tracking**: Real-time download progress with resume/checksum
@@ -276,18 +294,27 @@ KeyMissionUtility.View
   - Command-line and GUI integration
 - **Usage**: `python3 km360_usb_reset.py`
 
-#### km360_gui.py (v1.7)
-- **Purpose**: Main GUI application
+#### km360_gui.py (v2.4) - REFACTORED: Direct gphoto2 + ffmpeg
+- **Purpose**: GUI frontend for KeyMission 360 camera
+- **Architecture**: Direct gphoto2/ffmpeg calls for downloads and merges; km360 CLI for other operations
 - **Features**:
-  - File browser with right-click context menu
-  - Download manager with auto 360° metadata injection
-  - Settings configuration
-  - 360° Viewer integration
-  - Native file dialogs (GTK/KDE) with Places sidebar
-  - USB port memory for faster reset
-  - Quick Actions tab
-  - Camera info display
-  - Add to Start Menu integration
+  - File browser with metadata (size, timestamps)
+  - **Smart Download**: One-click analyze → download → merge → verify
+  - **Direct gphoto2 downloads**: Calls `gphoto2 --get-file` directly (no CLI wrapper overhead)
+  - **Direct ffmpeg merges**: Calls ffmpeg concat demuxer directly (no interactive prompts)
+  - **Skip existing files**: Compares local file size against camera size, skips matches
+  - **Skip existing merges**: Won't re-merge if output file already exists
+  - **Thread-safe UI**: All GUI updates via `root.after()` from worker threads
+  - **Error visibility**: Worker thread exceptions shown in progress dialog (not swallowed)
+  - **Temp file safety**: All subprocesses run with `cwd=dest_folder` to prevent temp files on camera
+  - FAT32 split detection (files near 4GB boundary + sequential naming + timestamps)
+  - 360° metadata re-injection via exiftool after merge
+  - Post-download verification (integrity + metadata checks)
+  - Headless test mode: `km360_gui.py --headless`
+- **Benefits**:
+  - No redundant camera detection per file (was causing hangs)
+  - No interactive `input()` prompts from CLI blocking subprocess
+  - Resume-friendly: re-run skips completed work
 
 #### km360_formatter.py
 - **Purpose**: Format SD card via raw PTP
@@ -326,6 +353,18 @@ KeyMissionUtility.View
   - Auto fallback between methods
   - Headless test mode
 - **Usage**: `python3 km360_youtube_export.py video.mp4`
+
+#### km360_merge.py (v1.0) - NEW
+- **Purpose**: Losslessly merge/concatenate video files while preserving 360° metadata
+- **Method**: ffmpeg concat demuxer + exiftool metadata injection
+- **Features**:
+  - Lossless concatenation (no re-encoding)
+  - 360° spherical metadata preservation
+  - Auto-detection of split recording sessions
+  - Video compatibility validation
+  - Detection-only preview mode
+- **Usage**: `python3 km360_merge.py -o merged.mp4 part1.MP4 part2.MP4`
+- **Auto-detection**: `python3 km360_merge.py --auto -o merged.mp4 DSCN*.MP4`
 
 #### km360_viewer.py (v1.5)
 - **Purpose**: Interactive 360° photo/video viewer
@@ -704,6 +743,9 @@ Note: WiFi features not accessible via USB gphoto2 - requires separate implement
 - Some settings read-only via USB
 - Live view error 0x00800000 (intentionally blocked)
 - gphoto2 movie toggle may not work reliably
+- **DRI_PRIME GPU messages can corrupt paths** - Fixed in v2.3 with path validation
+- **USB device busy errors** - May need reset if previous process didn't release camera
+- **Large file downloads take time** - 4GB+ files may take 15-30 minutes over USB
 
 ### 9.3 Windows App Issues
 - Slow thumbnail loading for large files
@@ -772,7 +814,165 @@ This project is especially valuable for:
 
 ---
 
+## 13. Lessons Learned & Implementation Notes
+
+### 13.1 Path Handling Bugs Discovered
+
+#### DRI_PRIME GPU Driver Pollution
+**Problem**: The `DRI_PRIME` environment variable for GPU switching causes error messages to pollute stdout:
+```
+Invalid value (0) for DRI_PRIME. Should be > 0 /actual/path/here
+```
+
+**Impact**: File paths returned by GTK dialogs were corrupted with this error message prefix, causing:
+- Downloads to go to wrong folders (created erroneous `-` folder)
+- 0-byte files in corrupted locations
+- Config file corruption
+
+**Solution**:
+1. Path cleaning function that extracts valid path from error-corrupted strings
+2. Validation to reject paths containing error patterns: `Invalid value`, `DRI_PRIME`, `Error:`, `Traceback`
+3. Multiline path handling - takes last line if newline detected
+4. Config save validation to prevent corrupted paths from being persisted
+
+**Code Location**:
+- `km360_config.py`: `set_last_download_dir()` - validates before saving
+- `km360_gui.py`: `_clean_path()` - extracts valid path from corruption
+
+#### Special Characters in Paths
+**Problem**: Folder names with special characters like `-=-` (e.g., `-=Original=-`) were being mangled by path cleaning code.
+
+**Solution**: Preserve exact path strings - only strip known error prefixes, not arbitrary characters.
+
+### 13.2 FAT32 Split Detection Thresholds
+
+**Discovery**: The 60-second gap threshold was too strict. Real-world test case:
+- DSCN0035.MP4 (4GB) at timestamp 1774269028
+- DSCN0036.MP4 (540MB) at timestamp 1774269110
+- **Actual gap**: 82 seconds
+
+**Solution**: Increased `MAX_GAP_SECONDS` from 60 to 300 (5 minutes) to accommodate real camera behavior.
+
+### 13.3 Merge Output Location
+**Clarification**: Merging always happens **locally** on the computer, never on the camera:
+1. Download all parts to destination folder
+2. Merge parts locally using ffmpeg (lossless concatenation)
+3. (Optional) Remove original part files, keep merged result
+
+### 13.3b GUI Download Architecture (v2.4 fix)
+**Problem**: The GUI originally shelled out to `km360 download` for each file. The CLI's `cmd_download` calls `detect_camera()` and `check_gphoto2()` every invocation, adding 10-15 seconds overhead per file. Worse, if the camera was busy from the previous gphoto2 call, `detect_camera()` would hang indefinitely — the GUI appeared to be "running" but no subprocess was visible.
+
+**Problem 2**: The GUI called `km360 merge` which contains interactive `input()` prompts (auto-detection confirmation, overwrite confirmation). When called via `subprocess.run` with captured output, `input()` would hang or error, causing silent merge failures.
+
+**Problem 3**: `subprocess.run` without `cwd=` inherited the working directory, which could be a camera mount point. gphoto2 temp files would then be created on the camera's SD card.
+
+**Solution**:
+1. Downloads call `gphoto2 --get-file` directly (no CLI wrapper)
+2. Merges call `ffmpeg` directly with concat demuxer (no CLI wrapper, no interactive prompts)
+3. All subprocess calls set `cwd=dest_folder` to keep temp files local
+4. Worker thread wrapped in try/except to surface errors in the progress dialog
+5. GUI updates use `root.after(0, ...)` for thread safety
+
+### 13.4 USB Device Busy Errors
+**Symptom**: `Could not claim the USB device` errors when trying to access camera.
+
+**Cause**: Previous process (GUI, gphoto2, or file manager) didn't release the device properly.
+
+**Solution**: USB Reset (`km360 reset`) or kill all gphoto2 processes before retrying.
+
+### 13.5 Download Progress Observation
+**Discovery**: gphoto2 creates temp files (e.g., `tmpfileXXXXXX`) during download and only renames to final filename when complete.
+
+**Implication**: Seeing 0-byte `.part` files or temp files is normal during active downloads. Wait for completion.
+
+### 13.6 GUI Auto-Connect Design
+**Decision**: GUI auto-connects on startup without showing dialogs. If camera not found:
+- Status bar shows "Failed to connect"
+- User can click "🔄 Refresh Files" to retry
+- Or "🔌 Reset USB" if device is busy
+
+---
+
 ## Changelog
+
+### v2.4 (2026-04-17) - Direct Download & Merge Fix
+- **FIXED**: GUI downloads now call `gphoto2 --get-file` directly instead of shelling out to CLI
+  - Eliminates redundant `detect_camera()` call per file (was causing hangs)
+  - Removes 10-15 second overhead per file from CLI startup
+- **FIXED**: GUI merges now call `ffmpeg` directly instead of CLI merge command
+  - Eliminates interactive `input()` prompts that hung subprocess calls
+  - First merge would fail silently; now works reliably
+- **FIXED**: Temp files no longer created on camera SD card
+  - All subprocess calls use `cwd=dest_folder`
+- **NEW**: Skip existing files during download
+  - Compares local file size against camera-reported size
+  - Skips files that already exist with correct size
+  - Re-downloads incomplete files automatically
+- **NEW**: Skip existing merged output files
+- **FIXED**: Worker thread exceptions now displayed in progress dialog (were silently swallowed)
+- **FIXED**: Thread-safe GUI updates via `root.after()` (was calling tkinter from background thread)
+
+### v2.3 (2026-03-23) - GUI Smart Download & Path Fixes
+- **NEW**: `delete` command for removing files from camera
+- **NEW**: GUI post-download verification
+  - Checks 360° metadata presence (ffprobe)
+  - Validates file integrity
+  - Shows verification report with copyable errors
+  - Safe delete from camera after verification
+- **NEW**: GUI Tools section
+  - "🔌 Reset USB" button with progress dialog
+  - "🔄 Refresh Files" button
+- **ENHANCED**: Path handling
+  - Fixed DRI_PRIME error message corruption
+  - Fixed paths with special characters (`-=Original=-`)
+  - Added path validation in config module
+  - Added error dialog with copy-to-clipboard button
+- **ENHANCED**: Merge detection
+  - Increased gap threshold from 60s to 300s (real-world testing)
+  - Better logging for merge operations
+- **FIXED**: GUI file picker uses native dialogs (Places sidebar)
+- **FIXED**: Config file no longer gets corrupted paths
+
+### v2.2 (2026-03-23) - Smart Dependency Management & Downloads
+- **NEW**: Dependency Manager (`km360 deps`, `km360 check`)
+  - Automatic detection of missing dependencies
+  - Interactive and auto-installation support
+  - Package manager detection (apt, pacman, brew, pip)
+  - Per-command dependency checking
+  - USB reset capability analysis
+  - Usage:
+    - `km360 check` - Check all deps and USB reset status
+    - `km360 deps --install` - Interactive install
+    - `km360 deps --install-all` - Auto-install everything
+    - `km360 deps --for youtube` - Check deps for specific command
+- **ENHANCED**: USB Reset (`km360 reset`)
+  - Now auto-checks and offers to install missing dependencies
+  - Better error messages with actionable fixes
+  - Detects available reset methods and recommends udev rules
+  - Automatic udev rules installation: `km360 install --udev`
+- **ENHANCED**: Video Merge (`km360 merge`)
+  - **Smart auto-detection**: Automatically detects when files might be sequential
+  - Prompts user to enable auto-detection when appropriate
+  - Added `--no-auto` to disable smart detection
+  - Added `--force` to skip confirmation prompts
+- **ENHANCED**: Download (`km360 download`)
+  - **Smart duplicate detection**: Automatically skips files that already exist with same size
+  - Shows summary of existing vs new files before downloading
+  - Verifies existing files with checksums
+  - Detects incomplete downloads (size mismatch) and re-downloads
+  - Added `--force` / `--no-skip` to re-download existing files
+
+### v2.1 (2026-03-23)
+- **NEW**: Video Merge Tool (`km360 merge`)
+  - Losslessly concatenate video files without re-encoding
+  - Preserves 360° spherical metadata for YouTube compatibility
+  - Auto-detects split recording sessions by:
+    - Sequential file naming (e.g., DSCN0016.MP4, DSCN0017.MP4)
+    - Similar creation timestamps (configurable gap tolerance)
+    - Matching video parameters (codec, resolution, frame rate)
+  - Standalone tool: `km360_merge.py`
+  - CLI integration: `km360 merge -o out.mp4 *.MP4`
+  - Detection-only mode for previewing merge candidates
 
 ### v1.8 (2026-03-12)
 - **Bug Fixes**:
@@ -863,6 +1063,6 @@ This project is especially valuable for:
 
 ---
 
-*Document Version: 2.0*
-*Date: 2026-03-17*
+*Document Version: 2.4*
+*Date: 2026-04-17*
 *Authors: AI Assistant / Claude Code*
