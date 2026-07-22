@@ -45,6 +45,22 @@ For non-root camera access, install the included udev rule described in [QUICKST
 The KeyMission 360 has no persistent real-time clock. Use **Sync camera clock** after a battery has
 been removed or depleted.
 
+## Sphere Viewer
+
+Select **Open 360 photo or video** inside the control center. The viewer opens a local file directly
+in the same application process.
+
+- Drag to look around the sphere.
+- Use the mouse wheel to zoom.
+- Keep the horizon guide visible and adjust **Roll** until walls, poles, and other vertical features
+  stand upright.
+- Use the ±90° buttons when the camera was held sideways or upside down.
+- **Export leveled copy** rotates the panorama on the sphere and preserves the equirectangular 2:1
+  canvas. It never overwrites the original.
+
+Do not rotate a stitched panorama in a flat photo editor. That rotates rectangular pixels rather
+than the represented sphere, mangling the seam, poles, and horizon.
+
 ## CLI
 
 ```bash

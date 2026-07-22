@@ -14,6 +14,7 @@ from tkinter import messagebox, ttk
 
 from km360_config import ask_directory, get_last_download_dir, set_last_download_dir
 from km360_core import Camera, CameraFile, dependency_status
+from km360_viewer import Viewer360
 
 BG = "#11151c"
 PANEL = "#1a202b"
@@ -166,7 +167,7 @@ class App:
             fill="x", pady=3
         )
         ttk.Button(
-            actions, text="Open 360 viewer", command=lambda: self._launch_cli("viewer")
+            actions, text="Open 360 photo or video", command=self.open_viewer
         ).pack(fill="x", pady=3)
         ttk.Button(
             actions,
@@ -179,8 +180,10 @@ class App:
 
         self.progress = ttk.Progressbar(self.root, mode="determinate")
         self.progress.pack(fill="x", padx=24)
-        self.activity = ttk.Label(self.root, text="Ready", style="Sub.TLabel")
-        self.activity.pack(fill="x", padx=24, pady=(7, 16))
+        self.activity = ttk.Label(
+            self.root, text="Ready", style="Sub.TLabel", padding=(0, 2)
+        )
+        self.activity.pack(fill="x", padx=24, pady=(8, 18))
 
     def _short_dest(self):
         return f"Destination: {self.destination.name or self.destination}"
@@ -338,6 +341,9 @@ class App:
             f"{'Ready' if ok else 'Missing'}: {name}" for name, ok in deps.items()
         )
         messagebox.showinfo("Connection diagnostics", text)
+
+    def open_viewer(self):
+        Viewer360(self.root)
 
     def _launch_cli(self, *args):
         subprocess.Popen(

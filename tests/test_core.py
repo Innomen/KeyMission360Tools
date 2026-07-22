@@ -4,6 +4,8 @@ import unittest
 
 from km360_core import parse_file_list, sha256
 from km360_gui import human_size
+from km360_viewer import Projector, reorient_equirectangular
+from PIL import Image
 
 
 SAMPLE = """There are 2 files in folder '/store'.
@@ -34,6 +36,15 @@ class CoreTests(unittest.TestCase):
 
     def test_human_size(self):
         self.assertEqual("1.0 MB", human_size(1024 * 1024))
+
+    def test_spherical_orientation_preserves_canvas(self):
+        source = Image.new("RGB", (512, 256), "navy")
+        output = reorient_equirectangular(source, 0, 0, 1.5708)
+        self.assertEqual(source.size, output.size)
+
+    def test_rectilinear_projection_size(self):
+        source = Image.new("RGB", (512, 256), "navy")
+        self.assertEqual((320, 200), Projector(320, 200).project(source).size)
 
 
 if __name__ == "__main__":
