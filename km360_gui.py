@@ -42,8 +42,8 @@ class App:
 
     def _style(self):
         self.root.title("KeyMission 360")
-        self.root.geometry("1120x760")
-        self.root.minsize(860, 600)
+        self.root.geometry("1120x820")
+        self.root.minsize(860, 700)
         self.root.configure(bg=BG)
         s = ttk.Style()
         s.theme_use("clam")
@@ -130,6 +130,24 @@ class App:
         self.tree.column("size", width=90, anchor="e")
         self.tree.column("date", width=140, anchor="center")
         self.tree.pack(fill="both", expand=True)
+        self.tree.bind("<Double-1>", self._open_tree_item)
+        self.tree.bind("<Return>", self._open_tree_item)
+        self.tree.bind("<Button-3>", self._show_media_menu)
+        self.tree.bind("<<TreeviewSelect>>", self._media_selected)
+        self.media_menu = tk.Menu(
+            self.root,
+            tearoff=False,
+            bg=PANEL_2,
+            fg=TEXT,
+            activebackground="#303b4d",
+            activeforeground=TEXT,
+        )
+        self.media_menu.add_command(
+            label="View in sphere viewer", command=self.view_selected
+        )
+        self.media_menu.add_command(
+            label="Download this item", command=self.download_selected
+        )
 
         ttk.Label(
             actions, text="Offload", style="Card.TLabel", font=("Sans", 13, "bold")
@@ -144,6 +162,13 @@ class App:
             actions, text=self._short_dest(), style="Status.TLabel", wraplength=260
         )
         self.dest_label.pack(anchor="w", pady=(0, 8))
+        self.view_btn = ttk.Button(
+            actions,
+            text="View selected media",
+            style="Accent.TButton",
+            command=self.view_selected,
+        )
+        self.view_btn.pack(fill="x", pady=(0, 8))
         ttk.Button(
             actions, text="Choose destination", command=self.choose_destination
         ).pack(fill="x", pady=3)
@@ -228,7 +253,12 @@ class App:
 
     def _controls(self, enabled):
         state = "normal" if enabled else "disabled"
-        for widget in (self.refresh_btn, self.download_btn, self.delete_btn):
+        for widget in (
+            self.refresh_btn,
+            self.view_btn,
+            self.download_btn,
+            self.delete_btn,
+        ):
             widget.config(state=state)
 
     def refresh(self):
@@ -236,10 +266,13 @@ class App:
         self._work(self.camera.files, self._show_files)
 
     def _show_files(self, files):
-        self.items = files
+        supported = (".jpg", ".jpeg", ".png", ".mp4", ".mov", ".avi")
+        self.items = [
+            item for item in files if Path(item.name).suffix.lower() in supported
+        ]
         self.tree.delete(*self.tree.get_children())
-        total = sum(item.size_bytes for item in files)
-        for item in files:
+        total = sum(item.size_bytes for item in self.items)
+        for item in self.items:
             kind = "Video" if item.mime.startswith("video/") else "Photo"
             date = (
                 datetime.fromtimestamp(item.timestamp).strftime("%Y-%m-%d %H:%M")
@@ -249,14 +282,15 @@ class App:
             self.tree.insert(
                 "",
                 "end",
+                iid=str(item.number),
                 text=item.name,
                 values=(kind, human_size(item.size_bytes), date),
             )
         self.dot.itemconfig(self.dot_id, fill=GOOD)
         self.status.config(text="Camera connected")
-        self.summary.config(text=f"{len(files)} items  •  {human_size(total)}")
+        self.summary.config(text=f"{len(self.items)} items  •  {human_size(total)}")
         self.activity.config(
-            text="Camera is empty" if not files else "Ready to offload"
+            text="Camera is empty" if not self.items else "Ready to view or offload"
         )
         self.progress["value"] = 0
 
@@ -268,6 +302,62 @@ class App:
             self.destination = Path(selected)
             set_last_download_dir(self.destination)
             self.dest_label.config(text=self._short_dest())
+
+    def _selected_item(self):
+        selected = self.tree.selection()
+        if not selected:
+            return None
+        number = int(selected[0])
+        return next((item for item in self.items if item.number == number), None)
+
+    def _open_tree_item(self, _event=None):
+        self.view_selected()
+
+    def _media_selected(self, _event=None):
+        if self.tree.selection():
+            self.activity.config(
+                text="Selected • double-click, press Enter, or choose View selected media"
+            )
+
+    def _show_media_menu(self, event):
+        row = self.tree.identify_row(event.y)
+        if not row:
+            return
+        self.tree.selection_set(row)
+        self.tree.focus(row)
+        self.media_menu.tk_popup(event.x_root, event.y_root)
+
+    def _local_copy(self, item):
+        path = self.destination / item.name
+        if path.is_file() and abs(path.stat().st_size - item.size_bytes) <= 1024:
+            return path
+        return None
+
+    def view_selected(self):
+        item = self._selected_item()
+        if item is None:
+            messagebox.showinfo("KeyMission 360", "Select a photo or video first.")
+            return
+        local = self._local_copy(item)
+        if local:
+            Viewer360(self.root, local)
+            return
+        self.activity.config(text="Downloading selected media before viewing…")
+        self._work(
+            lambda: self.camera.download(item, self.destination)[0],
+            lambda path: Viewer360(self.root, path),
+        )
+
+    def download_selected(self):
+        item = self._selected_item()
+        if item is None:
+            messagebox.showinfo("KeyMission 360", "Select a photo or video first.")
+            return
+        self.activity.config(text="Downloading selected media…")
+        self._work(
+            lambda: self.camera.download(item, self.destination)[0],
+            lambda _path: self.activity.config(text="Selected media downloaded"),
+        )
 
     def download_all(self):
         if not self.items:
