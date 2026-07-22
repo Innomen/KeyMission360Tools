@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+from datetime import datetime
 import json
 import mimetypes
 import subprocess
@@ -24,6 +25,7 @@ except (ImportError, ValueError):  # pragma: no cover - platform fallback
     Gio = Gtk = WebKit = None
 
 from km360_viewer import reorient_equirectangular
+from km360_config import get_config_value, set_config_value
 
 
 HTML = r"""<!doctype html><html><head><meta charset="utf-8"><style>
@@ -33,17 +35,17 @@ body{display:grid;grid-template-rows:auto 1fr auto}.toolbar,.controls{display:fl
 .title{font-size:20px;font-weight:700;margin-right:8px}button{border:0;border-radius:5px;padding:9px 13px;background:var(--panel2);color:var(--text);font-weight:600;cursor:pointer}
 button.primary{background:var(--accent);color:#071018}.check{display:flex;align-items:center;gap:6px;white-space:nowrap}.spacer{flex:1}
 #stage{position:relative;min-height:0;margin:0 16px;background:#05070a;overflow:hidden}canvas{display:block;width:100%;height:100%;cursor:crosshair}canvas.dragging{cursor:none}
-#guide{pointer-events:none;position:absolute;inset:0}#guide:before{content:"";position:absolute;left:0;right:0;top:50%;border-top:2px dashed var(--accent);opacity:.8}
-#reticle{pointer-events:none;position:absolute;left:50%;top:50%;width:20px;height:20px;transform:translate(-50%,-50%);opacity:.9}
+#guide{display:none;pointer-events:none;position:absolute;inset:0}#guide:before{content:"";position:absolute;left:0;right:0;top:50%;border-top:2px dashed var(--accent);opacity:.8}
+#reticle{display:none;pointer-events:none;position:absolute;left:50%;top:50%;width:20px;height:20px;transform:translate(-50%,-50%);opacity:.9}
 #reticle:before,#reticle:after{content:"";position:absolute;background:var(--accent);box-shadow:0 0 2px #000}#reticle:before{left:9px;top:0;width:2px;height:20px}#reticle:after{left:0;top:9px;width:20px;height:2px}
 .controls{padding-top:10px;padding-bottom:14px}.controls input[type=range]{width:270px}.muted{color:var(--muted)}
 #empty{position:absolute;inset:0;display:grid;place-items:center;color:var(--muted);font-size:18px;pointer-events:none}
 </style></head><body>
-<div class="toolbar"><span class="title">Sphere Viewer</span><button class="primary" onclick="host('open')">Open media</button><button onclick="resetView()">Reset view</button><button class="primary" onclick="makeLevel()">Make current view level</button><label class="check"><input id="invert" type="checkbox" checked><span aria-hidden="true">👁</span> Invert look</label><span class="spacer"></span><button onclick="toggleFullscreen()">Fullscreen</button><button id="export" onclick="exportCopy()" disabled>Export leveled copy</button></div>
+<div class="toolbar"><span class="title">Sphere Viewer</span><button class="primary" onclick="host('open')">Open media</button><button onclick="resetView()">Reset view</button><button class="primary" onclick="makeLevel()">Make current view level</button><label class="check"><input id="invert" type="checkbox" checked><span aria-hidden="true">👁</span> Invert look</label><span class="spacer"></span><button id="capture" onclick="saveView(event)" disabled title="Shift-click to choose a different folder">📷 Save current view</button><button onclick="toggleFullscreen()">Fullscreen</button><button id="export" onclick="exportCopy()" disabled>Save level to image</button></div>
 <div id="stage"><canvas id="gl"></canvas><div id="guide"></div><div id="reticle"></div><div id="empty">Open an equirectangular 360° image</div></div>
-<div class="controls"><b>Roll</b><input id="roll" type="range" min="-180" max="180" step="0.1" value="0"><span id="rollValue" class="muted">0.0°</span><button onclick="nudgeRoll(-90)">−90°</button><button onclick="nudgeRoll(90)">+90°</button><label class="check"><input id="showGuide" type="checkbox" checked> Horizon guide</label><span class="spacer"></span><span id="status" class="muted">Drag to look • wheel to zoom</span></div>
+<div class="controls"><b>Roll</b><input id="roll" type="range" min="-180" max="180" step="0.1" value="0"><span id="rollValue" class="muted">0.0°</span><button onclick="nudgeRoll(-90)">−90°</button><button onclick="nudgeRoll(90)">+90°</button><label class="check"><input id="showGuide" type="checkbox"> Horizon guide</label><label class="check"><input id="showReticle" type="checkbox"> Target reticle</label><span class="spacer"></span><span id="status" class="muted">Hold mouse to look • wheel to zoom</span></div>
 <script>
-const canvas=document.querySelector('#gl'), stage=document.querySelector('#stage'), gl=canvas.getContext('webgl2',{antialias:true,alpha:false});
+const canvas=document.querySelector('#gl'), stage=document.querySelector('#stage'), gl=canvas.getContext('webgl2',{antialias:true,alpha:false,preserveDrawingBuffer:true});
 const vs=`#version 300 es
 in vec2 p; out vec2 uv; void main(){uv=p*.5+.5;gl_Position=vec4(p,0.,1.);}`;
 const fs=`#version 300 es
@@ -58,15 +60,16 @@ function combined(){return mul(committed,rot(yaw,pitch,roll))}function columnMaj
 function resize(){let d=devicePixelRatio||1,w=Math.max(1,Math.round(stage.clientWidth*d)),h=Math.max(1,Math.round(stage.clientHeight*d));if(canvas.width!==w||canvas.height!==h){canvas.width=w;canvas.height=h}draw()}
 function requestDraw(){if(!pending){pending=true;requestAnimationFrame(()=>{pending=false;draw()})}}
 function draw(){if(!gl||!ready)return;gl.viewport(0,0,canvas.width,canvas.height);gl.useProgram(prog);gl.uniformMatrix3fv(gl.getUniformLocation(prog,'orient'),false,columnMajor(combined()));gl.uniform1f(gl.getUniformLocation(prog,'aspect'),canvas.width/canvas.height);gl.uniform1f(gl.getUniformLocation(prog,'tanHalf'),Math.tan(fov/2));gl.drawArrays(gl.TRIANGLES,0,3)}
-function loadImage(url,name){let img=new Image();img.onload=()=>{if(tex)gl.deleteTexture(tex);tex=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,tex);gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,false);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.REPEAT);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,img);ready=true;resetView();document.querySelector('#empty').style.display='none';document.querySelector('#export').disabled=false;document.querySelector('#status').textContent=name+' • GPU texture renderer';resize()};img.onerror=()=>host('error','Image could not be decoded');img.src=url}
-let drag=null;canvas.addEventListener('pointerdown',e=>{drag=[e.clientX,e.clientY];canvas.setPointerCapture(e.pointerId);canvas.classList.add('dragging')});canvas.addEventListener('pointermove',e=>{if(!drag)return;let dx=e.clientX-drag[0],dy=e.clientY-drag[1],inv=document.querySelector('#invert').checked?-1:1;yaw+=dx*.004*inv;pitch-=dy*.004*inv;pitch=Math.max(-Math.PI/2+.01,Math.min(Math.PI/2-.01,pitch));drag=[e.clientX,e.clientY];requestDraw()});function endDrag(){drag=null;canvas.classList.remove('dragging')}canvas.addEventListener('pointerup',endDrag);canvas.addEventListener('pointercancel',endDrag);canvas.addEventListener('wheel',e=>{e.preventDefault();fov=Math.max(Math.PI/9,Math.min(2*Math.PI/3,fov*(e.deltaY>0?1.08:.92)));requestDraw()},{passive:false});
+function loadImage(url,name){let img=new Image();img.onload=()=>{if(tex)gl.deleteTexture(tex);tex=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,tex);gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,false);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.REPEAT);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,img);ready=true;resetView();document.querySelector('#empty').style.display='none';document.querySelector('#export').disabled=false;document.querySelector('#capture').disabled=false;document.querySelector('#status').textContent=name+' • GPU texture renderer';resize()};img.onerror=()=>host('error','Image could not be decoded');img.src=url}
+let drag=null;canvas.addEventListener('pointerdown',e=>{drag=[e.clientX,e.clientY];canvas.classList.add('dragging');canvas.requestPointerLock?.()});document.addEventListener('mousemove',e=>{if(!drag)return;let locked=document.pointerLockElement===canvas,dx=locked?e.movementX:e.clientX-drag[0],dy=locked?e.movementY:e.clientY-drag[1],inv=document.querySelector('#invert').checked?-1:1;yaw+=dx*.004*inv;pitch-=dy*.004*inv;pitch=Math.max(-Math.PI/2+.01,Math.min(Math.PI/2-.01,pitch));drag=[e.clientX,e.clientY];requestDraw()});function endDrag(){drag=null;canvas.classList.remove('dragging');if(document.pointerLockElement===canvas)document.exitPointerLock()}document.addEventListener('mouseup',endDrag);canvas.addEventListener('pointercancel',endDrag);canvas.addEventListener('wheel',e=>{e.preventDefault();fov=Math.max(Math.PI/9,Math.min(2*Math.PI/3,fov*(e.deltaY>0?1.08:.92)));requestDraw()},{passive:false});
 const rollInput=document.querySelector('#roll');rollInput.oninput=()=>{roll=Number(rollInput.value)*Math.PI/180;document.querySelector('#rollValue').textContent=Number(rollInput.value).toFixed(1)+'°';requestDraw()};
 document.querySelector('#showGuide').onchange=e=>document.querySelector('#guide').style.display=e.target.checked?'block':'none';
+document.querySelector('#showReticle').onchange=e=>document.querySelector('#reticle').style.display=e.target.checked?'block':'none';
 function nudgeRoll(d){let v=((Number(rollInput.value)+d+180)%360)-180;rollInput.value=v;rollInput.oninput()}
 function resetControls(){yaw=pitch=roll=0;fov=Math.PI/2;rollInput.value=0;document.querySelector('#rollValue').textContent='0.0°'}
 function resetView(){committed=[1,0,0,0,1,0,0,0,1];resetControls();requestDraw()}
 function makeLevel(){committed=combined();resetControls();document.querySelector('#status').textContent='Current view is level • navigation axes reset';requestDraw()}
-function exportCopy(){host('export',JSON.stringify(combined()))}function toggleFullscreen(){document.fullscreenElement?document.exitFullscreen():document.documentElement.requestFullscreen()}
+function exportCopy(){host('export',JSON.stringify(combined()))}function saveView(event){draw();host('screenshot',JSON.stringify({png:canvas.toDataURL('image/png'),choose:event.shiftKey}))}function toggleFullscreen(){document.fullscreenElement?document.exitFullscreen():document.documentElement.requestFullscreen()}
 function host(action,data=''){window.webkit.messageHandlers.app.postMessage(JSON.stringify({action,data}))}
 window.loadPanorama=loadImage;window.addEventListener('resize',resize);new ResizeObserver(resize).observe(stage);resize();
 </script></body></html>"""
@@ -132,6 +135,8 @@ class SphereWindow:
             self._choose_open()
         elif action == "export":
             self._choose_export(message.get("data", ""))
+        elif action == "screenshot":
+            self._save_screenshot(message.get("data", ""))
         elif action == "error":
             self._error(message.get("data", "Unknown viewer error"))
 
@@ -161,10 +166,10 @@ class SphereWindow:
             self._error("The current orientation could not be read.")
             return
         dialog = Gtk.FileChooserNative.new(
-            "Export leveled copy",
+            "Save level to image",
             self.window,
             Gtk.FileChooserAction.SAVE,
-            "Export",
+            "Save copy",
             "Cancel",
         )
         default = self.path.with_name(self.path.stem + "_leveled.jpg")
@@ -182,6 +187,55 @@ class SphereWindow:
 
         dialog.connect("response", save)
         dialog.show()
+
+    def _save_screenshot(self, payload_json):
+        try:
+            payload = json.loads(payload_json)
+            encoded = payload["png"].split(",", 1)[1]
+            png = base64.b64decode(encoded, validate=True)
+        except (KeyError, ValueError, TypeError, json.JSONDecodeError):
+            self._error("The current view could not be captured.")
+            return
+        folder = Path(get_config_value("viewer_capture_dir", ""))
+        if payload.get("choose") or not folder.is_dir():
+            self._choose_capture_folder(png, folder)
+        else:
+            self._write_capture(png, folder)
+
+    def _choose_capture_folder(self, png, current):
+        dialog = Gtk.FileChooserNative.new(
+            "Choose current-view capture folder",
+            self.window,
+            Gtk.FileChooserAction.SELECT_FOLDER,
+            "Use this folder",
+            "Cancel",
+        )
+        if current.is_dir():
+            dialog.set_current_folder(Gio.File.new_for_path(str(current)))
+
+        def selected(d, response):
+            if response != Gtk.ResponseType.ACCEPT:
+                return
+            folder = Path(d.get_file().get_path())
+            set_config_value("viewer_capture_dir", str(folder))
+            self._write_capture(png, folder)
+
+        dialog.connect("response", selected)
+        dialog.show()
+
+    def _write_capture(self, png, folder):
+        stem = self.path.stem if self.path else "sphere"
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+        target = folder / f"{stem}_view_{stamp}.png"
+        try:
+            target.write_bytes(png)
+        except OSError as exc:
+            self._error(f"Capture failed: {exc}")
+            return
+        self._eval(
+            "document.querySelector('#status').textContent="
+            + json.dumps(f"Saved current view • {target.name}")
+        )
 
     def _error(self, text):
         dialog = Gtk.AlertDialog(message="Sphere Viewer", detail=str(text))

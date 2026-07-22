@@ -41,6 +41,11 @@ orientation, then resets the view pose. The visible image must not jump, and new
 navigation input must remain screen-relative. Export applies source and committed
 orientation to the equirectangular pixels without overwriting the original.
 
+GPano XMP provides writable `PoseHeadingDegrees`, `PosePitchDegrees`, and
+`PoseRollDegrees`. A future lossless orientation save should round-trip those fields
+against the viewer's matrix convention and keep rendered remapping as a compatibility
+export for software which ignores panorama pose metadata.
+
 ## Rendering boundary
 
 Interactive rendering and export have different jobs:
@@ -58,7 +63,7 @@ It should not remain the primary interactive renderer.
 1. Establish the shared standalone/embedded launch contract and desktop handlers.
 2. Add the GPU renderer behind the existing viewer API, retaining CPU fallback.
 3. Add image sequencing, drag-and-drop, fullscreen, shortcuts, fit/zoom, autorotate,
-   and persistent per-file pose sidecars.
+   persistent per-file pose sidecars, and GPano pose-metadata round trips.
 4. Add native-rate spherical video playback, scrub/audio controls, and corrected
    video export through FFmpeg.
 5. Add metadata diagnostics, projection validation, thumbnail/library browsing,

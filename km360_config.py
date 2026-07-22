@@ -29,6 +29,7 @@ DEFAULT_CONFIG = {
     "preferred_file_dialog": "auto",  # 'auto', 'gtk', 'tk'
     "last_usb_port": None,  # 'bus:addr' format, e.g., '001:015'
     "auto_sync_time": False,
+    "viewer_capture_dir": str(Path.home() / "Pictures" / "KM360" / "Views"),
 }
 
 
@@ -357,7 +358,7 @@ class GtkFileDialog(FileDialogProvider):
             try:
                 self.parent.update_idletasks()
                 self.parent.update()
-            except:
+            except Exception:
                 pass
 
         # Save the selected directory
@@ -442,7 +443,7 @@ class GtkFileDialog(FileDialogProvider):
             try:
                 self.parent.update_idletasks()
                 self.parent.update()
-            except:
+            except Exception:
                 pass
 
         if result:
@@ -509,7 +510,7 @@ class GtkFileDialog(FileDialogProvider):
             try:
                 self.parent.update_idletasks()
                 self.parent.update()
-            except:
+            except Exception:
                 pass
 
         if result:

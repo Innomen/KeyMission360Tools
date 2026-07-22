@@ -65,6 +65,11 @@ class CoreTests(unittest.TestCase):
         self.assertIn('id="invert" type="checkbox" checked', HTML)
         self.assertIn('id="reticle"', HTML)
         self.assertIn("canvas.dragging{cursor:none}", HTML)
+        self.assertIn("requestPointerLock", HTML)
+        self.assertIn("Save current view", HTML)
+        self.assertIn("Save level to image", HTML)
+        self.assertNotIn('id="showGuide" type="checkbox" checked', HTML)
+        self.assertNotIn('id="showReticle" type="checkbox" checked', HTML)
         self.assertLess(
             HTML.index("Make current view level"), HTML.index("Invert look")
         )

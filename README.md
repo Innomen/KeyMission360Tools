@@ -55,14 +55,17 @@ instead of remapping a new bitmap on the CPU.
 - Drag to look around the sphere.
 - Use the mouse wheel to zoom.
 - **Invert look** defaults on and reverses both axes for Quake-style navigation.
-- Keep the horizon guide visible and adjust **Roll** until walls, poles, and other vertical features
-  stand upright.
+- Hold the mouse button for unbounded pointer-lock navigation; releasing preserves the view.
+- The horizon guide and target reticle default off. Enable them while leveling when useful.
+- Adjust **Roll** until walls, poles, and other vertical features stand upright.
 - Use the ±90° buttons when the camera was held sideways or upside down.
 - Arrange the scene until it looks correct, then choose **Make current view level**. The viewer
   preserves that exact visible pose while resetting the navigation frame, so left/right/up/down are
   screen-relative again.
-- **Export leveled copy** rotates the panorama on the sphere and preserves the equirectangular 2:1
-  canvas. It never overwrites the original.
+- **Save level to image** rotates the panorama on the sphere and writes a new equirectangular 2:1
+  copy. It never overwrites the original.
+- **Save current view** writes the flat virtual-camera view as PNG. The first use chooses a folder;
+  later clicks save there immediately. Shift-click it to change the remembered folder.
 
 Do not rotate a stitched panorama in a flat photo editor. That rotates rectangular pixels rather
 than the represented sphere, mangling the seam, poles, and horizon.
