@@ -2,6 +2,8 @@
 
 A local Linux control center and CLI for the Nikon KeyMission 360.
 
+![KeyMission 360 Tools desktop interface](docs/keymission360-tools.png)
+
 The desktop app handles the routine camera workflow: see connection state and camera media,
 choose a destination, download with size and SHA-256 verification, clear the camera with an
 explicit confirmation, synchronize its clock, and reach diagnostics and advanced tools.
