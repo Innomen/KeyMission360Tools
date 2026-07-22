@@ -32,8 +32,8 @@ opencv-python>=4.5.0
 #   macOS:    brew install exiftool
 #
 # GUI support:
-#   Arch:     sudo pacman -S tk
-#   Ubuntu:   sudo apt-get install python3-tk
+#   Arch:     sudo pacman -S tk gtk4 webkitgtk-6.0 python-gobject
+#   Ubuntu:   sudo apt-get install python3-tk python3-gi gir1.2-gtk-4.0 gir1.2-webkit-6.0
 #
 # Quick install all dependencies:
 #   km360 deps --install-all

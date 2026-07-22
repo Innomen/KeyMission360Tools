@@ -140,7 +140,7 @@ def create_desktop_entries(apps_dir, icon_name=None, system_wide=False):
     # Get the absolute path to the km360_gui.py script
     script_dir = Path(__file__).parent.absolute()
     gui_script = script_dir / "km360_gui.py"
-    viewer_script = script_dir / "km360_viewer.py"
+    viewer_script = script_dir / "km360_sphere_viewer.py"
 
     if not gui_script.exists() or not viewer_script.exists():
         print(f"Error: Could not find application scripts in {script_dir}")

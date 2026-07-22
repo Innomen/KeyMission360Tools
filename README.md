@@ -47,11 +47,14 @@ been removed or depleted.
 
 ## Sphere Viewer
 
-Select **Open 360 photo or video** inside the control center. The viewer opens a local file directly
-in the same application process.
+Select **Open 360 photo or video** inside the control center, or launch **KeyMission Sphere Viewer**
+by itself for existing local panoramas. Both routes use the same viewer. JPEG, PNG, and WebP images
+use a WebGL texture renderer: the image is uploaded once and looking around moves a virtual camera
+instead of remapping a new bitmap on the CPU.
 
 - Drag to look around the sphere.
 - Use the mouse wheel to zoom.
+- Enable **Invert mouse Y** for Quake-style vertical navigation.
 - Keep the horizon guide visible and adjust **Roll** until walls, poles, and other vertical features
   stand upright.
 - Use the ±90° buttons when the camera was held sideways or upside down.
@@ -111,6 +114,7 @@ download, deletion, time sync, or format operation.
 | `km360` | Full standalone CLI |
 | `km360_config.py` | Local preferences and native dialogs |
 | `km360_viewer.py` | Interactive 360 media viewer |
+| `km360_sphere_viewer.py` | Shared GPU viewer used standalone and from 360 Tools |
 | `VIEWER_ARCHITECTURE.md` | Shared embedded/standalone viewer design and SphereView audit |
 | `km360_merge.py` | Lossless split-video joining |
 | `km360_youtube_export.py` | Spherical metadata handling |

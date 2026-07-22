@@ -1864,7 +1864,14 @@ def cmd_reset(args):
 
 
 def cmd_viewer(args):
-    """Launch 360° viewer"""
+    """Launch the shared standalone 360° viewer."""
+    viewer = Path(__file__).resolve().with_name("km360_sphere_viewer.py")
+    command = [sys.executable, str(viewer)]
+    if args.file:
+        command.append(str(args.file))
+    return subprocess.run(command, check=False).returncode
+
+    # Legacy CPU viewer retained temporarily as a portable fallback reference.
     try:
         import numpy as np
         from PIL import Image, ImageTk

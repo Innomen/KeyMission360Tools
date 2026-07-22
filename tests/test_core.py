@@ -5,6 +5,7 @@ import numpy as np
 
 from km360_core import parse_file_list, sha256
 from km360_gui import human_size
+from km360_sphere_viewer import HTML
 from km360_viewer import Projector, reorient_equirectangular, rotation_matrix
 from PIL import Image
 
@@ -57,6 +58,13 @@ class CoreTests(unittest.TestCase):
         projector.yaw = projector.pitch = projector.roll = 0
         after_bake = projector.orientation @ rotation_matrix(0, 0, 0)
         self.assertTrue(np.allclose(visible_pose, after_bake))
+
+    def test_gpu_viewer_has_texture_renderer_and_invert_y(self):
+        self.assertIn("getContext('webgl2'", HTML)
+        self.assertIn("Invert mouse Y", HTML)
+        self.assertLess(
+            HTML.index("Make current view level"), HTML.index("Invert mouse Y")
+        )
 
 
 if __name__ == "__main__":

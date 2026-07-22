@@ -14,7 +14,7 @@ from tkinter import messagebox, ttk
 
 from km360_config import ask_directory, get_last_download_dir, set_last_download_dir
 from km360_core import Camera, CameraFile, dependency_status
-from km360_viewer import Viewer360
+from km360_sphere_viewer import launch_viewer
 
 BG = "#11151c"
 PANEL = "#1a202b"
@@ -340,12 +340,12 @@ class App:
             return
         local = self._local_copy(item)
         if local:
-            Viewer360(self.root, local)
+            launch_viewer(local)
             return
         self.activity.config(text="Downloading selected media before viewing…")
         self._work(
             lambda: self.camera.download(item, self.destination)[0],
-            lambda path: Viewer360(self.root, path),
+            launch_viewer,
         )
 
     def download_selected(self):
@@ -433,7 +433,7 @@ class App:
         messagebox.showinfo("Connection diagnostics", text)
 
     def open_viewer(self):
-        Viewer360(self.root)
+        launch_viewer()
 
     def _launch_cli(self, *args):
         subprocess.Popen(
