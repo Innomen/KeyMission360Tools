@@ -32,14 +32,15 @@ HTML = r"""<!doctype html><html><head><meta charset="utf-8"><style>
 body{display:grid;grid-template-rows:auto 1fr auto}.toolbar,.controls{display:flex;align-items:center;gap:8px;padding:12px 16px;background:var(--bg)}
 .title{font-size:20px;font-weight:700;margin-right:8px}button{border:0;border-radius:5px;padding:9px 13px;background:var(--panel2);color:var(--text);font-weight:600;cursor:pointer}
 button.primary{background:var(--accent);color:#071018}.check{display:flex;align-items:center;gap:6px;white-space:nowrap}.spacer{flex:1}
-#stage{position:relative;min-height:0;margin:0 16px;background:#05070a;overflow:hidden}canvas{display:block;width:100%;height:100%;cursor:grab}canvas.dragging{cursor:grabbing}
+#stage{position:relative;min-height:0;margin:0 16px;background:#05070a;overflow:hidden}canvas{display:block;width:100%;height:100%;cursor:none}
 #guide{pointer-events:none;position:absolute;inset:0}#guide:before{content:"";position:absolute;left:0;right:0;top:50%;border-top:2px dashed var(--accent);opacity:.8}
-#guide:after{content:"";position:absolute;left:50%;top:calc(50% - 28px);height:56px;border-left:2px solid var(--accent)}
+#reticle{pointer-events:none;position:absolute;left:50%;top:50%;width:20px;height:20px;transform:translate(-50%,-50%);opacity:.9}
+#reticle:before,#reticle:after{content:"";position:absolute;background:var(--accent);box-shadow:0 0 2px #000}#reticle:before{left:9px;top:0;width:2px;height:20px}#reticle:after{left:0;top:9px;width:20px;height:2px}
 .controls{padding-top:10px;padding-bottom:14px}.controls input[type=range]{width:270px}.muted{color:var(--muted)}
 #empty{position:absolute;inset:0;display:grid;place-items:center;color:var(--muted);font-size:18px;pointer-events:none}
 </style></head><body>
-<div class="toolbar"><span class="title">Sphere Viewer</span><button class="primary" onclick="host('open')">Open media</button><button onclick="resetView()">Reset view</button><button class="primary" onclick="makeLevel()">Make current view level</button><label class="check"><input id="invert" type="checkbox"> Invert mouse Y</label><span class="spacer"></span><button onclick="toggleFullscreen()">Fullscreen</button><button id="export" onclick="exportCopy()" disabled>Export leveled copy</button></div>
-<div id="stage"><canvas id="gl"></canvas><div id="guide"></div><div id="empty">Open an equirectangular 360° image</div></div>
+<div class="toolbar"><span class="title">Sphere Viewer</span><button class="primary" onclick="host('open')">Open media</button><button onclick="resetView()">Reset view</button><button class="primary" onclick="makeLevel()">Make current view level</button><label class="check"><input id="invert" type="checkbox"><span aria-hidden="true">👁</span> Invert look</label><span class="spacer"></span><button onclick="toggleFullscreen()">Fullscreen</button><button id="export" onclick="exportCopy()" disabled>Export leveled copy</button></div>
+<div id="stage"><canvas id="gl"></canvas><div id="guide"></div><div id="reticle"></div><div id="empty">Open an equirectangular 360° image</div></div>
 <div class="controls"><b>Roll</b><input id="roll" type="range" min="-180" max="180" step="0.1" value="0"><span id="rollValue" class="muted">0.0°</span><button onclick="nudgeRoll(-90)">−90°</button><button onclick="nudgeRoll(90)">+90°</button><label class="check"><input id="showGuide" type="checkbox" checked> Horizon guide</label><span class="spacer"></span><span id="status" class="muted">Drag to look • wheel to zoom</span></div>
 <script>
 const canvas=document.querySelector('#gl'), stage=document.querySelector('#stage'), gl=canvas.getContext('webgl2',{antialias:true,alpha:false});
@@ -58,7 +59,7 @@ function resize(){let d=devicePixelRatio||1,w=Math.max(1,Math.round(stage.client
 function requestDraw(){if(!pending){pending=true;requestAnimationFrame(()=>{pending=false;draw()})}}
 function draw(){if(!gl||!ready)return;gl.viewport(0,0,canvas.width,canvas.height);gl.useProgram(prog);gl.uniformMatrix3fv(gl.getUniformLocation(prog,'orient'),false,columnMajor(combined()));gl.uniform1f(gl.getUniformLocation(prog,'aspect'),canvas.width/canvas.height);gl.uniform1f(gl.getUniformLocation(prog,'tanHalf'),Math.tan(fov/2));gl.drawArrays(gl.TRIANGLES,0,3)}
 function loadImage(url,name){let img=new Image();img.onload=()=>{if(tex)gl.deleteTexture(tex);tex=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,tex);gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,false);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.REPEAT);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,img);ready=true;resetView();document.querySelector('#empty').style.display='none';document.querySelector('#export').disabled=false;document.querySelector('#status').textContent=name+' • GPU texture renderer';resize()};img.onerror=()=>host('error','Image could not be decoded');img.src=url}
-let drag=null;canvas.addEventListener('pointerdown',e=>{drag=[e.clientX,e.clientY];canvas.setPointerCapture(e.pointerId);canvas.classList.add('dragging')});canvas.addEventListener('pointermove',e=>{if(!drag)return;let dx=e.clientX-drag[0],dy=e.clientY-drag[1];yaw+=dx*.004;pitch+=dy*.004*(document.querySelector('#invert').checked?1:-1);pitch=Math.max(-Math.PI/2+.01,Math.min(Math.PI/2-.01,pitch));drag=[e.clientX,e.clientY];requestDraw()});canvas.addEventListener('pointerup',()=>{drag=null;canvas.classList.remove('dragging')});canvas.addEventListener('wheel',e=>{e.preventDefault();fov=Math.max(Math.PI/9,Math.min(2*Math.PI/3,fov*(e.deltaY>0?1.08:.92)));requestDraw()},{passive:false});
+let drag=null;canvas.addEventListener('pointerdown',e=>{drag=[e.clientX,e.clientY];canvas.setPointerCapture(e.pointerId)});canvas.addEventListener('pointermove',e=>{if(!drag)return;let dx=e.clientX-drag[0],dy=e.clientY-drag[1],inv=document.querySelector('#invert').checked?-1:1;yaw+=dx*.004*inv;pitch-=dy*.004*inv;pitch=Math.max(-Math.PI/2+.01,Math.min(Math.PI/2-.01,pitch));drag=[e.clientX,e.clientY];requestDraw()});canvas.addEventListener('pointerup',()=>{drag=null});canvas.addEventListener('wheel',e=>{e.preventDefault();fov=Math.max(Math.PI/9,Math.min(2*Math.PI/3,fov*(e.deltaY>0?1.08:.92)));requestDraw()},{passive:false});
 const rollInput=document.querySelector('#roll');rollInput.oninput=()=>{roll=Number(rollInput.value)*Math.PI/180;document.querySelector('#rollValue').textContent=Number(rollInput.value).toFixed(1)+'°';requestDraw()};
 document.querySelector('#showGuide').onchange=e=>document.querySelector('#guide').style.display=e.target.checked?'block':'none';
 function nudgeRoll(d){let v=((Number(rollInput.value)+d+180)%360)-180;rollInput.value=v;rollInput.oninput()}
@@ -206,7 +207,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if args.test:
         assert "getContext('webgl2'" in HTML
-        assert "Invert mouse Y" in HTML
+        assert "Invert look" in HTML
         print("✓ GPU sphere viewer assets passed")
         return 0
     if not available():

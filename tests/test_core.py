@@ -61,9 +61,10 @@ class CoreTests(unittest.TestCase):
 
     def test_gpu_viewer_has_texture_renderer_and_invert_y(self):
         self.assertIn("getContext('webgl2'", HTML)
-        self.assertIn("Invert mouse Y", HTML)
+        self.assertIn("Invert look", HTML)
+        self.assertIn('id="reticle"', HTML)
         self.assertLess(
-            HTML.index("Make current view level"), HTML.index("Invert mouse Y")
+            HTML.index("Make current view level"), HTML.index("Invert look")
         )
 
 

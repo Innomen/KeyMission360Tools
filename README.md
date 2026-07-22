@@ -54,7 +54,7 @@ instead of remapping a new bitmap on the CPU.
 
 - Drag to look around the sphere.
 - Use the mouse wheel to zoom.
-- Enable **Invert mouse Y** for Quake-style vertical navigation.
+- Enable **Invert look** to reverse both axes for Quake-style navigation.
 - Keep the horizon guide visible and adjust **Roll** until walls, poles, and other vertical features
   stand upright.
 - Use the ±90° buttons when the camera was held sideways or upside down.
