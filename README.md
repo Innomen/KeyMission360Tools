@@ -55,6 +55,9 @@ in the same application process.
 - Keep the horizon guide visible and adjust **Roll** until walls, poles, and other vertical features
   stand upright.
 - Use the ±90° buttons when the camera was held sideways or upside down.
+- Arrange the scene until it looks correct, then choose **Make current view level**. The viewer
+  preserves that exact visible pose while resetting the navigation frame, so left/right/up/down are
+  screen-relative again.
 - **Export leveled copy** rotates the panorama on the sphere and preserves the equirectangular 2:1
   canvas. It never overwrites the original.
 

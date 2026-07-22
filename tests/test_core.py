@@ -1,10 +1,11 @@
 from pathlib import Path
 import tempfile
 import unittest
+import numpy as np
 
 from km360_core import parse_file_list, sha256
 from km360_gui import human_size
-from km360_viewer import Projector, reorient_equirectangular
+from km360_viewer import Projector, reorient_equirectangular, rotation_matrix
 from PIL import Image
 
 
@@ -39,12 +40,23 @@ class CoreTests(unittest.TestCase):
 
     def test_spherical_orientation_preserves_canvas(self):
         source = Image.new("RGB", (512, 256), "navy")
-        output = reorient_equirectangular(source, 0, 0, 1.5708)
+        output = reorient_equirectangular(source, rotation_matrix(0, 0, 1.5708))
         self.assertEqual(source.size, output.size)
 
     def test_rectilinear_projection_size(self):
         source = Image.new("RGB", (512, 256), "navy")
         self.assertEqual((320, 200), Projector(320, 200).project(source).size)
+
+    def test_baking_view_preserves_pose_and_resets_control_frame(self):
+        projector = Projector()
+        projector.yaw, projector.pitch, projector.roll = 0.4, -0.2, 1.5708
+        visible_pose = projector.orientation @ rotation_matrix(
+            projector.yaw, projector.pitch, projector.roll
+        )
+        projector.orientation = visible_pose
+        projector.yaw = projector.pitch = projector.roll = 0
+        after_bake = projector.orientation @ rotation_matrix(0, 0, 0)
+        self.assertTrue(np.allclose(visible_pose, after_bake))
 
 
 if __name__ == "__main__":

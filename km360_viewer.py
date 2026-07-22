@@ -66,34 +66,50 @@ class Projector:
             0.0,
             math.radians(90),
         )
+        self.orientation = np.eye(3)
+        self._ray_cache = {}
 
-    def project(self, image):
+    def project(self, image, scale=1.0):
         src = np.asarray(image.convert("RGB"))
         h, w = src.shape[:2]
-        f = (self.width / 2) / math.tan(self.fov / 2)
-        x, y = np.meshgrid(
-            np.arange(self.width) - self.width / 2,
-            np.arange(self.height) - self.height / 2,
+        out_w, out_h = (
+            max(240, int(self.width * scale)),
+            max(160, int(self.height * scale)),
         )
-        rays = np.stack((x, y, np.full_like(x, f)), axis=-1).astype(np.float32)
-        rays /= np.linalg.norm(rays, axis=-1, keepdims=True)
-        rays = rays @ rotation_matrix(self.yaw, self.pitch, self.roll).T
+        key = (out_w, out_h, round(self.fov, 5))
+        rays = self._ray_cache.get(key)
+        if rays is None:
+            f = (out_w / 2) / math.tan(self.fov / 2)
+            x, y = np.meshgrid(
+                np.arange(out_w) - out_w / 2, np.arange(out_h) - out_h / 2
+            )
+            rays = np.stack((x, y, np.full_like(x, f)), axis=-1).astype(np.float32)
+            rays /= np.linalg.norm(rays, axis=-1, keepdims=True)
+            self._ray_cache = {key: rays}
+        view = rotation_matrix(self.yaw, self.pitch, self.roll)
+        rays = rays @ (self.orientation @ view).T
         lon = np.arctan2(rays[..., 0], rays[..., 2])
         lat = np.arcsin(np.clip(rays[..., 1], -1, 1))
-        return Image.fromarray(
+        result = Image.fromarray(
             remap(src, (lon / (2 * math.pi) + 0.5) * w, (0.5 - lat / math.pi) * (h - 1))
         )
+        if scale != 1.0:
+            result = result.resize((self.width, self.height), Image.Resampling.BILINEAR)
+        return result
 
 
-def reorient_equirectangular(image, yaw, pitch, roll):
+def reorient_equirectangular(image, orientation):
     src = np.asarray(image.convert("RGB"))
     h, w = src.shape[:2]
     lon, lat = np.meshgrid(
         (np.arange(w) / w - 0.5) * 2 * math.pi, (0.5 - np.arange(h) / (h - 1)) * math.pi
     )
-    vec = np.stack(
-        (np.cos(lat) * np.sin(lon), np.sin(lat), np.cos(lat) * np.cos(lon)), axis=-1
-    ) @ rotation_matrix(yaw, pitch, roll)
+    vec = (
+        np.stack(
+            (np.cos(lat) * np.sin(lon), np.sin(lat), np.cos(lat) * np.cos(lon)), axis=-1
+        )
+        @ orientation.T
+    )
     slon = np.arctan2(vec[..., 0], vec[..., 2])
     slat = np.arcsin(np.clip(vec[..., 1], -1, 1))
     return Image.fromarray(
@@ -116,6 +132,8 @@ class Viewer360:
         self.file_path = self.frame = self.capture = self.drag = None
         self.playing = False
         self.projector = Projector()
+        self.render_pending = False
+        self.render_preview = False
         self._style()
         self._build()
         self._bind()
@@ -153,6 +171,12 @@ class Viewer360:
         ttk.Button(
             bar, text="Reset view", style="Viewer.TButton", command=self.reset_view
         ).pack(side="left")
+        ttk.Button(
+            bar,
+            text="Make current view level",
+            style="ViewerAccent.TButton",
+            command=self.make_current_level,
+        ).pack(side="left", padx=8)
         self.save_btn = ttk.Button(
             bar,
             text="Export leveled copy",
@@ -203,7 +227,7 @@ class Viewer360:
     def _bind(self):
         self.canvas.bind("<Button-1>", lambda e: setattr(self, "drag", (e.x, e.y)))
         self.canvas.bind("<B1-Motion>", self._drag)
-        self.canvas.bind("<ButtonRelease-1>", lambda e: setattr(self, "drag", None))
+        self.canvas.bind("<ButtonRelease-1>", self._drag_end)
         self.canvas.bind("<Button-4>", lambda e: self.zoom(0.9))
         self.canvas.bind("<Button-5>", lambda e: self.zoom(1.1))
         self.window.bind("<Escape>", lambda e: self.window.destroy())
@@ -254,7 +278,7 @@ class Viewer360:
     def _resize(self, e):
         self.projector.width = max(320, e.width)
         self.projector.height = max(240, e.height)
-        self.render()
+        self.request_render()
 
     def _drag(self, e):
         if not self.drag:
@@ -269,18 +293,22 @@ class Viewer360:
             )
         )
         self.drag = (e.x, e.y)
-        self.render()
+        self.request_render(preview=True)
+
+    def _drag_end(self, _event):
+        self.drag = None
+        self.request_render()
 
     def zoom(self, f):
         self.projector.fov = float(
             np.clip(self.projector.fov * f, math.radians(25), math.radians(120))
         )
-        self.render()
+        self.request_render(preview=True)
 
     def _roll(self, v):
         self.projector.roll = math.radians(float(v))
         self.roll_label.config(text=f"{float(v):.1f}°")
-        self.render()
+        self.request_render(preview=True)
 
     def set_roll(self, v):
         v = ((v + 180) % 360) - 180
@@ -290,14 +318,44 @@ class Viewer360:
     def reset_view(self):
         self.projector.yaw = self.projector.pitch = self.projector.roll = 0
         self.projector.fov = math.radians(90)
+        self.projector.orientation = np.eye(3)
         self.roll_var.set(0)
         self.roll_label.config(text="0.0°")
-        self.render()
+        self.request_render()
 
-    def render(self):
+    def make_current_level(self):
+        """Bake the visible spherical pose into the panorama and reset screen controls."""
+        view = rotation_matrix(
+            self.projector.yaw, self.projector.pitch, self.projector.roll
+        )
+        self.projector.orientation = self.projector.orientation @ view
+        self.projector.yaw = self.projector.pitch = self.projector.roll = 0
+        self.roll_var.set(0)
+        self.roll_label.config(text="0.0°")
+        self.info.config(text="Current view is level • navigation axes reset")
+        self.request_render()
+
+    def request_render(self, preview=False):
+        if not preview:
+            self.render_preview = False
+        elif not self.render_pending:
+            self.render_preview = True
+        if self.render_pending:
+            return
+        self.render_pending = True
+        self.window.after_idle(self._render_now)
+
+    def _render_now(self):
+        preview = self.render_preview
+        self.render_pending = self.render_preview = False
+        self.render(preview=preview)
+
+    def render(self, preview=False):
         if self.frame is None or self.canvas.winfo_width() < 2:
             return
-        self.tk_image = ImageTk.PhotoImage(self.projector.project(self.frame))
+        self.tk_image = ImageTk.PhotoImage(
+            self.projector.project(self.frame, scale=0.5 if preview else 1.0)
+        )
         self.canvas.delete("all")
         w, h = self.canvas.winfo_width(), self.canvas.winfo_height()
         self.canvas.create_image(w / 2, h / 2, image=self.tk_image)
@@ -322,9 +380,10 @@ class Viewer360:
         if p:
             reorient_equirectangular(
                 self.frame,
-                self.projector.yaw,
-                self.projector.pitch,
-                self.projector.roll,
+                self.projector.orientation
+                @ rotation_matrix(
+                    self.projector.yaw, self.projector.pitch, self.projector.roll
+                ),
             ).save(p, quality=95)
             messagebox.showinfo(
                 "Sphere Viewer",
@@ -337,7 +396,7 @@ class Viewer360:
             ok, frame = self.capture.read()
             if ok:
                 self.frame = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-                self.render()
+                self.request_render(preview=True)
             else:
                 self.capture.set(cv2.CAP_PROP_POS_FRAMES, 0)
         if self.window.winfo_exists():
@@ -352,7 +411,10 @@ def main():
     if a.test:
         fixture = Image.new("RGB", (1024, 512), "navy")
         assert Projector(320, 200).project(fixture).size == (320, 200)
-        assert reorient_equirectangular(fixture, 0, 0, math.pi / 2).size == fixture.size
+        assert (
+            reorient_equirectangular(fixture, rotation_matrix(0, 0, math.pi / 2)).size
+            == fixture.size
+        )
         print("✓ spherical projection and reorientation passed")
         return 0
     root = tk.Tk()
