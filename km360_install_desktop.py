@@ -134,15 +134,16 @@ def create_icon_png(icon_path):
             return False
 
 
-def create_desktop_entry(desktop_path, icon_name=None, system_wide=False):
-    """Create the .desktop file"""
+def create_desktop_entries(apps_dir, icon_name=None, system_wide=False):
+    """Create distinct camera-manager and spherical-media desktop entries."""
 
     # Get the absolute path to the km360_gui.py script
     script_dir = Path(__file__).parent.absolute()
     gui_script = script_dir / "km360_gui.py"
+    viewer_script = script_dir / "km360_viewer.py"
 
-    if not gui_script.exists():
-        print(f"Error: Could not find {gui_script}")
+    if not gui_script.exists() or not viewer_script.exists():
+        print(f"Error: Could not find application scripts in {script_dir}")
         print("Make sure you're running this from the KeyMission360Tools directory.")
         return False
 
@@ -150,12 +151,13 @@ def create_desktop_entry(desktop_path, icon_name=None, system_wide=False):
     # Menu launchers get a minimal PATH.  Pin the interpreter that is running
     # this installer so KDE cannot silently select an unrelated system Python.
     python = Path(sys.executable).resolve()
-    exec_line = f'"{python}" "{gui_script}"'
+    manager_exec = f'"{python}" "{gui_script}"'
+    viewer_exec = f'"{python}" "{viewer_script}" %f'
 
-    desktop_content = f"""[Desktop Entry]
+    manager_content = f"""[Desktop Entry]
 Name=KeyMission 360 Utility
 Comment=Nikon KeyMission 360/170 Camera Manager for Linux
-Exec={exec_line}
+Exec={manager_exec}
 TryExec={python}
 Type=Application
 Terminal=false
@@ -164,18 +166,33 @@ Categories=Graphics;Photography;
 Keywords=Camera;Nikon;360;Video;Photo;KeyMission;
 StartupNotify=true
 StartupWMClass=KeyMission 360 Linux Utility
+"""
+    viewer_content = f"""[Desktop Entry]
+Name=KeyMission Sphere Viewer
+GenericName=360° Media Viewer
+Comment=View and level equirectangular 360° photos and videos
+Exec={viewer_exec}
+TryExec={python}
+Type=Application
+Terminal=false
+Icon={icon_name or "image-x-generic"}
+Categories=Graphics;Photography;Viewer;
+Keywords=360;Sphere;Photosphere;Panorama;Equirectangular;Video;
+StartupNotify=true
 MimeType=image/jpeg;image/png;video/mp4;video/quicktime;
 """
 
     try:
         # Ensure directory exists
-        desktop_path.parent.mkdir(parents=True, exist_ok=True)
+        apps_dir.mkdir(parents=True, exist_ok=True)
 
-        # Write the desktop file
-        desktop_path.write_text(desktop_content)
-
-        # Make executable
-        desktop_path.chmod(0o755)
+        for name, content in (
+            ("km360-utility.desktop", manager_content),
+            ("km360-viewer.desktop", viewer_content),
+        ):
+            desktop_path = apps_dir / name
+            desktop_path.write_text(content)
+            desktop_path.chmod(0o755)
 
         return True
 
@@ -214,11 +231,13 @@ def install(system_wide=False, force=False):
     user_icons_dir, system_icons_dir = get_icon_dirs()
 
     if system_wide:
-        desktop_path = system_apps_dirs[0] / "km360-utility.desktop"
+        apps_dir = system_apps_dirs[0]
         icon_dir = system_icons_dir
     else:
-        desktop_path = user_apps_dir / "km360-utility.desktop"
+        apps_dir = user_apps_dir
         icon_dir = user_icons_dir
+
+    desktop_path = apps_dir / "km360-utility.desktop"
 
     print("KeyMission 360 Desktop Entry Installer")
     print(f"{'=' * 50}")
@@ -261,8 +280,9 @@ def install(system_wide=False, force=False):
 
     # Create desktop entry
     print("\nCreating desktop entry...")
-    if create_desktop_entry(desktop_path, icon_name, system_wide):
-        print(f"  ✓ Desktop entry created: {desktop_path}")
+    if create_desktop_entries(apps_dir, icon_name, system_wide):
+        print(f"  ✓ Camera manager: {desktop_path}")
+        print(f"  ✓ Sphere viewer: {apps_dir / 'km360-viewer.desktop'}")
         refresh_desktop_caches()
     else:
         print("  ✗ Failed to create desktop entry")
@@ -272,8 +292,8 @@ def install(system_wide=False, force=False):
     print("=" * 50)
     print("Installation successful!")
     print()
-    print("You can now launch the KeyMission 360 Utility from:")
-    print("  • Application menu (search for 'KeyMission')")
+    print("You can now launch either application from:")
+    print("  • Application menu (search for 'KeyMission' or 'Sphere Viewer')")
     print("  • Activities overview (GNOME)")
     print("  • Alt+F2 run dialog")
     print()
@@ -290,10 +310,16 @@ def remove(system_wide=False):
     user_icons_dir, system_icons_dir = get_icon_dirs()
 
     if system_wide:
-        desktop_path = system_apps_dirs[0] / "km360-utility.desktop"
+        desktop_paths = [
+            system_apps_dirs[0] / "km360-utility.desktop",
+            system_apps_dirs[0] / "km360-viewer.desktop",
+        ]
         icon_path = system_icons_dir / "km360-utility.png"
     else:
-        desktop_path = user_apps_dir / "km360-utility.desktop"
+        desktop_paths = [
+            user_apps_dir / "km360-utility.desktop",
+            user_apps_dir / "km360-viewer.desktop",
+        ]
         icon_path = user_icons_dir / "km360-utility.png"
 
     print("Removing KeyMission 360 desktop entry...")
@@ -301,7 +327,10 @@ def remove(system_wide=False):
 
     removed = False
 
-    if desktop_path.exists():
+    for desktop_path in desktop_paths:
+        if not desktop_path.exists():
+            print(f"  - Not found: {desktop_path}")
+            continue
         try:
             desktop_path.unlink()
             print(f"  ✓ Removed: {desktop_path}")
@@ -312,8 +341,6 @@ def remove(system_wide=False):
                 print("    Try running with sudo.")
         except Exception as e:
             print(f"  ✗ Error removing {desktop_path}: {e}")
-    else:
-        print(f"  - Not found: {desktop_path}")
 
     if icon_path.exists():
         try:
@@ -335,6 +362,7 @@ def check_status():
     user_apps_dir, system_apps_dirs = get_desktop_dirs()
 
     user_desktop = user_apps_dir / "km360-utility.desktop"
+    user_viewer = user_apps_dir / "km360-viewer.desktop"
     system_desktop = (
         system_apps_dirs[0] / "km360-utility.desktop" if system_apps_dirs else None
     )
@@ -356,6 +384,8 @@ def check_status():
             pass
     else:
         print("✗ User install: Not found")
+
+    print(f"{'✓' if user_viewer.exists() else '✗'} Standalone viewer: {user_viewer}")
 
     print()
 

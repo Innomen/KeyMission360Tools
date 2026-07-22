@@ -111,6 +111,7 @@ download, deletion, time sync, or format operation.
 | `km360` | Full standalone CLI |
 | `km360_config.py` | Local preferences and native dialogs |
 | `km360_viewer.py` | Interactive 360 media viewer |
+| `VIEWER_ARCHITECTURE.md` | Shared embedded/standalone viewer design and SphereView audit |
 | `km360_merge.py` | Lossless split-video joining |
 | `km360_youtube_export.py` | Spherical metadata handling |
 | `km360_install_desktop.py` | KDE/GNOME application-menu integration |
